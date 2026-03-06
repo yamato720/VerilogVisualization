@@ -43,7 +43,7 @@ Designed for Chisel-generated RTL and hand-written Verilog — parse a single `.
 ### One-command setup & launch
 
 ```bash
-git clone https://github.com/<your-username>/VerilogVisualization.git
+git clone https://github.com/yamato720/VerilogVisualization.git
 cd VerilogVisualization
 bash setup.sh
 ```
