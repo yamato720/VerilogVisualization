@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Verilog Visualizer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <div class="sidebar-header">
+    <h2>⚡ Verilog Visualizer</h2>
+    <button id="btn-collapse-sidebar" class="sidebar-collapse-btn" onclick="toggleSidebar()" title="收起侧边栏">◀</button>
+  </div>
+
+  <!-- Open Design Section -->
+  <div class="sidebar-section">
+    <h3>打开设计</h3>
+    <div class="open-buttons">
+      <button id="btn-browse" class="btn-primary" onclick="openFileBrowser()">📂 浏览文件...</button>
+    </div>
+    <div class="input-group" style="margin-top:6px;">
+      <input type="text" id="path-input" placeholder="或直接输入路径..." />
+      <button id="btn-analyze" title="分析">▶</button>
+    </div>
+    <div id="analyze-status" class="status-msg"></div>
+  </div>
+
+  <!-- Saved Designs -->
+  <div class="sidebar-section">
+    <h3>已保存设计</h3>
+    <div id="design-list" class="design-list"></div>
+  </div>
+
+  <!-- Module Tree -->
+  <div class="sidebar-section" id="module-tree-section" style="display:none;">
+    <h3>模块层次</h3>
+    <div id="module-tree"></div>
+  </div>
+
+  <!-- Export -->
+  <div class="sidebar-section" id="export-section" style="display:none;">
+    <h3>导出</h3>
+    <div class="export-buttons">
+      <button onclick="exportSVG()">📐 SVG</button>
+      <button onclick="exportPNG()">🖼️ PNG</button>
+      <button onclick="exportHTML()">🌐 HTML</button>
+    </div>
+    <div class="export-buttons" style="margin-top:6px;">
+      <button onclick="resetLayout()" title="重置所有模块位置和线路编辑">🔄 重置布局</button>
+      <button onclick="fitView()" title="适应窗口">📐 适应窗口</button>
+    </div>
+    <div class="export-buttons" style="margin-top:6px;">
+      <button id="btn-toggle-clk-rst" onclick="toggleClockReset()" title="显示/隐藏时钟和复位信号线">🕐 显示时钟/复位</button>
+    </div>
+  </div>
+</div>
+
+<!-- Main Content -->
+<div id="main">
+  <!-- Sidebar expand button (visible when sidebar collapsed) -->
+  <button id="btn-expand-sidebar" class="sidebar-expand-btn" onclick="toggleSidebar()" title="展开侧边栏" style="display:none;">▶</button>
+  <!-- Fullscreen toggle -->
+  <button id="btn-fullscreen" class="fullscreen-btn" onclick="toggleFullscreen()" title="全屏">⛶</button>
+  <!-- Tab Bar -->
+  <div id="tab-bar"></div>
+
+  <!-- Canvas Area -->
+  <div id="canvas-container">
+    <div id="welcome-screen">
+      <div class="welcome-content">
+        <h1>⚡ Verilog Visualizer</h1>
+        <p>点击「浏览文件」选择 Verilog 文件或文件夹</p>
+        <p>或从已保存设计中选择一个打开</p>
+        <button class="btn-primary btn-large" onclick="openFileBrowser()" style="margin-top:16px;">📂 浏览文件...</button>
+      </div>
+    </div>
+    <svg id="main-svg" xmlns="http://www.w3.org/2000/svg" style="display:none;">
+      <defs>
+        <marker id="arrow-out" viewBox="0 0 10 6" refX="10" refY="3"
+                markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,3 L0,6 Z" fill="#4fc3f7"/>
+        </marker>
+        <marker id="arrow-out-hl" viewBox="0 0 10 6" refX="10" refY="3"
+                markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,3 L0,6 Z" fill="#ffeb3b"/>
+        </marker>
+      </defs>
+      <g id="svg-root"></g>
+    </svg>
+  </div>
+
+  <!-- Info Panel (bottom) -->
+  <div id="info-panel" style="display:none;">
+    <div id="info-content"></div>
+    <button id="info-close" onclick="closeInfoPanel()">✕</button>
+  </div>
+</div>
+
+<!-- ============ File Browser Modal ============ -->
+<div id="fb-overlay" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeFileBrowser()">
+  <div class="modal fb-modal">
+    <div class="modal-header">
+      <h3>📂 选择 Verilog 文件或文件夹</h3>
+      <button class="modal-close" onclick="closeFileBrowser()">✕</button>
+    </div>
+    <!-- Navigation bar -->
+    <div class="fb-navbar">
+      <button class="fb-nav-btn" onclick="fbGoUp()" title="上级目录">⬆</button>
+      <button class="fb-nav-btn" onclick="fbGoHome()" title="主目录">🏠</button>
+      <div id="fb-breadcrumb" class="fb-breadcrumb"></div>
+    </div>
+    <!-- Quick path input -->
+    <div class="fb-path-row">
+      <input type="text" id="fb-path-input" placeholder="输入路径并回车..." onkeydown="if(event.key==='Enter')fbNavigateTo(this.value)" />
+      <button onclick="fbNavigateTo(document.getElementById('fb-path-input').value)">前往</button>
+    </div>
+    <!-- File list -->
+    <div id="fb-file-list" class="fb-file-list"></div>
+    <!-- Footer -->
+    <div class="fb-footer">
+      <div class="fb-selected-row">
+        <span class="fb-label">已选择:</span>
+        <span id="fb-selected-path" class="fb-selected-val">（无）</span>
+      </div>
+      <div class="fb-actions">
+        <button class="btn-secondary" onclick="fbSelectCurrentFolder()">📁 选择当前文件夹</button>
+        <button id="fb-btn-confirm" class="btn-primary" onclick="fbConfirmSelection()" disabled>打开并分析</button>
+        <button class="btn-secondary" onclick="closeFileBrowser()">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Context menu -->
+<div id="context-menu" class="context-menu" style="display:none;"></div>
+
+<script src="/static/renderer.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
