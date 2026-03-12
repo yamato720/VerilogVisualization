@@ -130,6 +130,43 @@ def reload_design():
             'saved_as': result['saved_as'],
             'top_modules': result['top_modules'],
             'module_count': len(result['modules']),
+            'source_files': result.get('source_files', []),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/refresh', methods=['POST'])
+def refresh_design():
+    """Refresh a design by re-analyzing all its source files."""
+    data = request.get_json()
+    design_name = data.get('name', '')
+
+    if not design_name:
+        return jsonify({'error': 'No design name provided'}), 400
+
+    json_path = os.path.join(DATA_DIR, f"{design_name}.json")
+    if not os.path.exists(json_path):
+        return jsonify({'error': f'Design not found: {design_name}'}), 404
+
+    with open(json_path, 'r') as f:
+        old_data = json.load(f)
+
+    source_path = old_data.get('source_path', '')
+    source_files = old_data.get('source_files', [])
+
+    # Check source path exists
+    if not source_path or not os.path.exists(source_path):
+        return jsonify({'error': f'Source path no longer exists: {source_path}'}), 404
+
+    try:
+        result = analyze_and_save(source_path, DATA_DIR)
+        return jsonify({
+            'success': True,
+            'saved_as': result['saved_as'],
+            'top_modules': result['top_modules'],
+            'module_count': len(result['modules']),
+            'source_files': result.get('source_files', []),
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -177,6 +214,31 @@ def delete_design(name):
         os.remove(json_path)
         return jsonify({'success': True})
     return jsonify({'error': 'Not found'}), 404
+
+
+@app.route('/api/save_comment', methods=['POST'])
+def save_comment():
+    """Save a module comment (.md) file under data/<design_name>/<inst_name>.md."""
+    data = request.get_json()
+    design_name = data.get('design_name', '')
+    inst_name = data.get('inst_name', '')
+    content = data.get('content', '')
+
+    if not design_name or not inst_name:
+        return jsonify({'error': 'design_name and inst_name required'}), 400
+
+    # Sanitize names to safe filenames
+    safe_design = os.path.basename(design_name)
+    safe_inst = os.path.basename(inst_name).replace('/', '_').replace('\\', '_')
+
+    comment_dir = os.path.join(DATA_DIR, safe_design)
+    os.makedirs(comment_dir, exist_ok=True)
+    out_path = os.path.join(comment_dir, f"{safe_inst}.md")
+
+    with open(out_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    return jsonify({'success': True, 'path': out_path})
 
 
 @app.route('/api/export/<name>/<fmt>')

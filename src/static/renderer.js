@@ -149,7 +149,7 @@ function calcModuleSize(mod, collapsedState = {}, hideClockReset = false) {
   addLabels(outGroups, 'out');
   allVisible.forEach(l => { maxNameLen = Math.max(maxNameLen, l.length); });
 
-  const width = Math.max(LAYOUT.MODULE_MIN_WIDTH, maxNameLen * 7 + 50);
+  const width = Math.max(LAYOUT.MODULE_MIN_WIDTH, Math.min(maxNameLen * 7 + 50, 500));
   const height = LAYOUT.MODULE_HEADER_H + maxRows * (LAYOUT.PORT_H + LAYOUT.PORT_GAP) + LAYOUT.PORT_GAP * 2 + 4;
 
   return { width, height, inGroups, outGroups };
@@ -158,11 +158,17 @@ function calcModuleSize(mod, collapsedState = {}, hideClockReset = false) {
 // ─── Render a single module box ──────────────────────────────────────────
 
 function renderModuleBox(mod, x, y, opts = {}) {
-  const { isTop = false, collapsedState = {}, instName = '', widthOverride, heightOverride, hideClockReset = false } = opts;
+  const { isTop = false, collapsedState = {}, instName = '', widthOverride, heightOverride, hideClockReset = false, customizations } = opts;
   const info = calcModuleSize(mod, collapsedState, hideClockReset);
   const W = widthOverride || info.width;
   const H = heightOverride || info.height;
   const { inGroups, outGroups } = info;
+
+  // Custom module color / rename / comment
+  const modCustom = customizations?.modules?.[instName];
+  const customFill = modCustom?.color || null;
+  const customName = modCustom?.rename || null;
+  const customComment = modCustom?.comment || null;
 
   const g = svgEl('g', {
     class: 'module-box',
@@ -174,7 +180,7 @@ function renderModuleBox(mod, x, y, opts = {}) {
   // Main rect
   g.appendChild(svgEl('rect', {
     class: 'module-rect', x: 0, y: 0, width: W, height: H, rx: 6, ry: 6,
-    fill: isTop ? COL.topFill : COL.modFill,
+    fill: customFill || (isTop ? COL.topFill : COL.modFill),
     stroke: isTop ? COL.topStroke : COL.modStroke,
     'stroke-width': isTop ? 2 : 1.5,
   }));
@@ -183,13 +189,21 @@ function renderModuleBox(mod, x, y, opts = {}) {
   g.appendChild(svgEl('rect', { x: 1, y: LAYOUT.MODULE_HEADER_H / 2, width: W - 2, height: LAYOUT.MODULE_HEADER_H / 2, fill: COL.header }));
 
   // Title text
-  const titleStr = instName ? `${instName} : ${mod.name}` : mod.name;
+  const displayName = customName || (instName ? `${instName} : ${mod.name}` : mod.name);
+  const titleStr = displayName;
   const title = svgEl('text', {
     class: 'module-title', x: W / 2, y: LAYOUT.MODULE_HEADER_H / 2 + 5,
     'text-anchor': 'middle', 'font-size': LAYOUT.TITLE_FONT, fill: COL.txt, 'font-weight': '600',
   });
-  title.textContent = titleStr.length > 28 ? titleStr.slice(0, 26) + '…' : titleStr;
+  title.textContent = titleStr.length > 36 ? titleStr.slice(0, 34) + '…' : titleStr;
   g.appendChild(title);
+
+  // Add SVG tooltip for truncated titles
+  if (titleStr.length > 36) {
+    const tooltip = svgEl('title');
+    tooltip.textContent = titleStr;
+    title.appendChild(tooltip);
+  }
 
   // Expand indicator
   if (mod.instances && mod.instances.length > 0) {
@@ -569,7 +583,7 @@ function avoidObstaclesVertical(x1, y1, x2, y2, routeX, obstacles, offset) {
   return null;
 }
 
-function drawWire(x1, y1, x2, y2, isBus, signalName, wireIdx, totalWires, wireKey, waypoints, obstacles) {
+function drawWire(x1, y1, x2, y2, isBus, signalName, wireIdx, totalWires, wireKey, waypoints, obstacles, customColor) {
   const g = svgEl('g', {
     class: 'wire-group',
     'data-signal': signalName,
@@ -580,7 +594,7 @@ function drawWire(x1, y1, x2, y2, isBus, signalName, wireIdx, totalWires, wireKe
 
   const path = svgEl('path', {
     class: 'wire-path' + (isBus ? ' bus' : ''),
-    d, fill: 'none', stroke: COL.wire,
+    d, fill: 'none', stroke: customColor || COL.wire,
     'stroke-width': isBus ? 3 : 1.5,
     'data-signal': signalName,
   });
@@ -653,6 +667,7 @@ function layoutInstances(instances, allModules, collapsedState, layoutOverrides,
 function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsedState, layoutOverrides, wireWaypoints, options) {
   const g = svgEl('g', { class: 'module-internal', 'data-module': parentMod.name });
   const hideClockReset = options?.hideClockReset || false;
+  const customizations = options?.customizations || { modules: {}, wires: {} };
 
   // Create separate layers so wires render behind module boxes
   const wireLayer = svgEl('g', { class: 'wire-layer' });
@@ -675,6 +690,7 @@ function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsed
       widthOverride: ovr?.width,
       heightOverride: ovr?.height,
       hideClockReset,
+      customizations,
     });
     moduleLayer.appendChild(r.group);
     renders[item.instance.instance_name] = {
@@ -882,6 +898,7 @@ function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsed
     // Wire key for identifying this wire in layout persistence
     const wireKey = `${w.out.inst}.${w.out.port}→${w.inp.inst}.${w.inp.port}`;
     const waypoints = wireWaypoints?.[wireKey] || [];
+    const customWireColor = customizations.wires?.[wireKey]?.color || null;
 
     // Filter obstacles: exclude the source and target modules
     const filteredObs = obstacles.filter(o => o.inst !== w.out.inst && o.inst !== w.inp.inst);
@@ -890,7 +907,7 @@ function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsed
       w.out.pos.x, w.out.pos.y,
       w.inp.pos.x, w.inp.pos.y,
       w.isBus, w.signal, idx, total,
-      wireKey, waypoints, filteredObs
+      wireKey, waypoints, filteredObs, customWireColor
     );
     wireLayer.appendChild(wire);
   });

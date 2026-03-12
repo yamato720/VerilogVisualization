@@ -448,6 +448,28 @@ def analyze_and_save(source_path: str, data_dir: str) -> Dict:
     result = build_hierarchy(modules)
     result['source_path'] = os.path.abspath(source_path)
 
+    # Collect all source files that were parsed
+    source_files = []
+    for m in modules:
+        if m.source_file:
+            if os.path.isdir(source_path):
+                # Walk directory to find the actual full path
+                for root, dirs, files in os.walk(source_path):
+                    if m.source_file in files:
+                        full_path = os.path.join(root, m.source_file)
+                        if full_path not in source_files:
+                            source_files.append(full_path)
+            else:
+                full_path = os.path.abspath(source_path)
+                if full_path not in source_files:
+                    source_files.append(full_path)
+                # Also include sibling files that were parsed
+                parent_dir = os.path.dirname(full_path)
+                sibling_path = os.path.join(parent_dir, m.source_file)
+                if os.path.exists(sibling_path) and sibling_path not in source_files:
+                    source_files.append(sibling_path)
+    result['source_files'] = sorted(source_files)
+
     # Determine save name from top module or folder name
     top_modules = result['top_modules']
     if len(top_modules) == 1:

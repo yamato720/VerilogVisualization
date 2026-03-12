@@ -44,12 +44,41 @@ function loadViewState(designName) {
 }
 
 const STORAGE_HIDE_CLK_RST = 'vviz_hide_clk_rst';
+const STORAGE_CUSTOM_PREFIX = 'vviz_custom_';
+
 function saveHideClockReset(val) {
   try { localStorage.setItem(STORAGE_HIDE_CLK_RST, JSON.stringify(val)); } catch(e) {}
 }
 function loadHideClockReset() {
   try { const d = localStorage.getItem(STORAGE_HIDE_CLK_RST); return d !== null ? JSON.parse(d) : true; }
   catch(e) { return true; }
+}
+
+// Customization: { modules: { instName: { color, rename, comment } }, wires: { wireKey: { color } } }
+function saveCustomizations(designName, data) {
+  try { localStorage.setItem(STORAGE_CUSTOM_PREFIX + designName, JSON.stringify(data)); } catch(e) {}
+}
+function loadCustomizations(designName) {
+  try { const d = localStorage.getItem(STORAGE_CUSTOM_PREFIX + designName); return d ? JSON.parse(d) : { modules: {}, wires: {} }; }
+  catch(e) { return { modules: {}, wires: {} }; }
+}
+
+const STORAGE_CANVAS_BG = 'vviz_canvas_bg';
+function saveCanvasBgColor(color) {
+  try { localStorage.setItem(STORAGE_CANVAS_BG, color); } catch(e) {}
+}
+function loadCanvasBgColor() {
+  try { return localStorage.getItem(STORAGE_CANVAS_BG) || '#0d1117'; }
+  catch(e) { return '#0d1117'; }
+}
+
+const STORAGE_COMMENT_POPUP_SIZE = 'vviz_comment_popup_size';
+function saveCommentPopupSize(w, h) {
+  try { localStorage.setItem(STORAGE_COMMENT_POPUP_SIZE, JSON.stringify({ w, h })); } catch(e) {}
+}
+function loadCommentPopupSize() {
+  try { const d = localStorage.getItem(STORAGE_COMMENT_POPUP_SIZE); return d ? JSON.parse(d) : { w: 340, h: 260 }; }
+  catch(e) { return { w: 340, h: 260 }; }
 }
 
 // ─── State ──────────────────────────────────────────────────────────────
@@ -78,6 +107,23 @@ const state = {
   hideClockReset: loadHideClockReset(),
   // Wire selection
   selectedWireKey: null,
+  // Customizations per design: { modules: {}, wires: {} }
+  customizations: {},
+  // Settings modal context
+  settingsTarget: null,  // { type: 'module'|'wire', key: instName|wireKey }
+  // Undo/Redo
+  undoStack: [],     // array of { layoutOverrides, wireWaypoints } snapshots
+  redoStack: [],
+  maxUndoHistory: 50,
+  // Guard: set true after drag ends to prevent background click from deselecting
+  justFinishedDrag: false,
+  // Box selection state
+  boxSelection: null,       // { items: Set<instName>, waypoints: [{wireKey, idx}] } or null
+  boxSelecting: false,      // true while rubber-band is active
+  boxSelectStart: null,     // { x, y } in design coords
+  boxSelectCurrent: null,   // { x, y } in design coords
+  // Canvas background color ('transparent' = show default but export transparently)
+  canvasBgColor: loadCanvasBgColor(),
 };
 
 // ─── DOM helpers ────────────────────────────────────────────────────────
@@ -96,6 +142,31 @@ document.addEventListener('DOMContentLoaded', () => {
   // Update clock/reset toggle button text on load
   const clkBtn = $('btn-toggle-clk-rst');
   if (clkBtn) clkBtn.textContent = state.hideClockReset ? '🕐 显示时钟/复位' : '🕐 隐藏时钟/复位';
+
+  // Apply saved canvas background color and sync UI
+  applyCanvasBgColor(state.canvasBgColor);
+  // Use setCanvasBgColor to sync preset highlight + picker (no-op side effects fine at init)
+  // Defer until DOM is fully ready for preset buttons to exist
+  setTimeout(() => setCanvasBgColor(state.canvasBgColor), 0);
+
+  // Close comment popup and module-info-popup on canvas click
+  const container = $('canvas-container');
+  if (container) {
+    container.addEventListener('click', e => {
+      const commentPopup = $('comment-popup');
+      if (commentPopup && commentPopup.style.display !== 'none' && !commentPopup.contains(e.target)) {
+        closeCommentPopup();
+      }
+      const infoPopup = $('module-info-popup');
+      if (infoPopup && infoPopup.style.display !== 'none' && !infoPopup.contains(e.target)) {
+        closeModuleInfoPopup();
+      }
+    });
+  }
+
+  // Pre-init resize handle so it's ready before first popup open
+  const popup = $('comment-popup');
+  if (popup) initCommentPopupResize(popup);
 
   // Path input — enter to analyze
   $('path-input').addEventListener('keydown', e => {
@@ -123,6 +194,61 @@ window.fitView = () => { state.pan = { x: 0, y: 0 }; state.zoom = 1; fitToView()
 window.toggleClockReset = toggleClockReset;
 window.toggleSidebar = toggleSidebar;
 window.toggleFullscreen = toggleFullscreen;
+window.refreshDesign = refreshDesign;
+window.openSettingsPanel = openSettingsPanel;
+window.closeSettingsModal = closeSettingsModal;
+window.applySettings = applySettings;
+window.closeCommentPopup = closeCommentPopup;
+window.handleCommentFileImport = handleCommentFileImport;
+window.setCanvasBgColor = setCanvasBgColor;
+window.closeModuleInfoPopup = closeModuleInfoPopup;
+window.openSettingsFromInfoPopup = openSettingsFromInfoPopup;
+window.openCommentFromInfoPopup = openCommentFromInfoPopup;
+
+/**
+ * Apply the canvas background color to the canvas container.
+ * 'transparent' shows the default dark background on canvas,
+ * but exports with a transparent background.
+ */
+function applyCanvasBgColor(color) {
+  const container = $('canvas-container');
+  if (!container) return;
+  if (color === 'transparent') {
+    // Transparent: show default dark color in canvas, export transparently
+    container.style.background = '';
+  } else {
+    container.style.background = color;
+  }
+}
+
+/**
+ * Change the canvas background color.
+ * Pass 'transparent' for transparent export (default dark shown on canvas).
+ */
+function setCanvasBgColor(color) {
+  state.canvasBgColor = color;
+  saveCanvasBgColor(color);
+  applyCanvasBgColor(color);
+  // Update color picker value (skip for transparent)
+  const picker = $('canvas-bg-color');
+  if (picker && color !== 'transparent') picker.value = color;
+  // Update active highlight on preset buttons
+  const presetMap = {
+    '#0d1117': 'bg-preset-default',
+    '#ffffff': 'bg-preset-white',
+    '#1c2333': 'bg-preset-gray',
+    'transparent': 'bg-preset-transparent',
+  };
+  ['bg-preset-default','bg-preset-white','bg-preset-gray','bg-preset-transparent'].forEach(id => {
+    const btn = $(id);
+    if (btn) btn.classList.remove('active');
+  });
+  const activeId = presetMap[color];
+  if (activeId) {
+    const btn = $(activeId);
+    if (btn) btn.classList.add('active');
+  }
+}
 
 function toggleClockReset() {
   state.hideClockReset = !state.hideClockReset;
@@ -160,6 +286,26 @@ function toggleFullscreen() {
     document.documentElement.requestFullscreen().catch(() => {});
   } else {
     document.exitFullscreen().catch(() => {});
+  }
+}
+
+async function refreshDesign() {
+  const name = state.activeTab;
+  if (!name) { showToast('没有打开的设计', 'warn'); return; }
+  showToast(`正在刷新 ${name}...`, 'info');
+  try {
+    const res = await fetch('/api/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const data = await res.json();
+    if (data.error) { showToast('刷新失败: ' + data.error, 'error'); return; }
+    // Re-open the design to reload data
+    await openDesign(data.saved_as || name);
+    showToast(`已刷新: ${name}`, 'success');
+  } catch (err) {
+    showToast('刷新失败: ' + err.message, 'error');
   }
 }
 
@@ -407,6 +553,7 @@ async function openDesign(name) {
     // Load persisted layout overrides and wire waypoints from localStorage
     state.layoutOverrides[name] = loadLayout(name);
     state.wireWaypoints[name] = loadWireWaypoints(name);
+    state.customizations[name] = loadCustomizations(name);
 
     // Load persisted view state (pan/zoom)
     const savedView = loadViewState(name);
@@ -504,6 +651,21 @@ function renderTabs() {
 
 // ─── Sidebar: Module Tree ───────────────────────────────────────────────
 
+/**
+ * Find the parent module that contains childModName as an instance.
+ * Returns the module name of the parent, or null if not found.
+ */
+function findParentModule(designName, childModName) {
+  const design = state.designs[designName];
+  if (!design) return null;
+  for (const [modName, mod] of Object.entries(design.modules)) {
+    if (mod.instances?.some(inst => inst.module_type === childModName)) {
+      return modName;
+    }
+  }
+  return null;
+}
+
 function renderSidebar(designName) {
   const tree = $('module-tree');
   tree.innerHTML = '';
@@ -559,21 +721,52 @@ function renderSidebar(designName) {
       <span style="color:#484f58;font-size:11px;margin-left:auto;">${mod.ports?.length || 0}p</span>`;
 
     label.addEventListener('click', () => {
-      // Single click: navigate to the module instance position in the current canvas
-      navigateToModule(designName, modName);
+      // Single click: navigate to the module — if visible, pan to it; if not, enter its view
+      const tab2 = state.openTabs.find(t => t.name === designName);
+      const svgRoot = getSVGRoot();
+      const boxes = svgRoot.querySelectorAll(`.module-box[data-module="${modName}"]`);
+      if (boxes.length > 0) {
+        // Module is visible in current view: just pan to it
+        navigateToModule(designName, modName);
+      } else if (hasChildren) {
+        // Module has instances: switch to its own internal view
+        if (tab2) tab2.module = modName;
+        if (!state.expandedModules[designName].has(modName)) {
+          state.expandedModules[designName].add(modName);
+        }
+        renderSidebar(designName);
+        renderCanvas();
+        setTimeout(() => fitToView(), 50);
+      } else {
+        // Leaf module (no instances): navigate to the parent that contains it,
+        // then pan/highlight the module instance box within that view
+        const parentModName = findParentModule(designName, modName);
+        if (parentModName && tab2) {
+          tab2.module = parentModName;
+          if (!state.expandedModules[designName].has(parentModName)) {
+            state.expandedModules[designName].add(parentModName);
+          }
+          renderSidebar(designName);
+          renderCanvas();
+          setTimeout(() => navigateToModule(designName, modName), 100);
+        } else if (modules[modName]) {
+          // Fallback: no parent found (it's already a top-level module), just open it
+          if (tab2) tab2.module = modName;
+          renderSidebar(designName);
+          renderCanvas();
+          setTimeout(() => fitToView(), 50);
+        }
+      }
     });
 
     if (hasChildren) {
       label.addEventListener('dblclick', (e) => {
         e.preventDefault();
-        // Double click on expandable: toggle expand/collapse in sidebar tree
+        // Double click on expandable: toggle expand/collapse in sidebar tree only
         const exp = state.expandedModules[designName];
         if (exp.has(modName)) exp.delete(modName);
         else exp.add(modName);
-        // Also set as viewed module and expand in canvas
-        if (tab) tab.module = modName;
         renderSidebar(designName);
-        renderCanvas();
       });
     }
 
@@ -711,6 +904,7 @@ function renderCanvas() {
   const rootG = renderDesignView(topMod, modules, expanded, state.collapsedState, layoutOvr, wireWps, {
     hideClockReset: state.hideClockReset,
     selectedWireKey: state.selectedWireKey,
+    customizations: state.customizations[tab.name] || { modules: {}, wires: {} },
   });
   svgRoot.appendChild(rootG);
 
@@ -728,6 +922,33 @@ function renderCanvas() {
       if (expanded.has(modName)) expanded.delete(modName);
       else expanded.add(modName);
       renderCanvas();
+    });
+
+    // Right-click: show floating module info popup with settings entry
+    box.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!instName) return;
+      state.settingsTarget = { type: 'module', key: instName };
+      const customs = state.customizations[tab.name] || { modules: {} };
+      const modCustom = customs.modules?.[instName] || {};
+      const mod = modules[modName];
+      const inP = mod?.ports?.filter(p => p.direction === 'input').length || 0;
+      const outP = mod?.ports?.filter(p => p.direction === 'output').length || 0;
+      showModuleInfoPopup(instName, modName, modCustom, inP, outP, e.clientX, e.clientY);
+    });
+
+    // Left-click: show comment popup (if comment exists)
+    box.addEventListener('click', e => {
+      if (state.justFinishedDrag) return;
+      e.stopPropagation();
+      const customs = state.customizations[tab.name] || { modules: {} };
+      const modCustom = customs.modules?.[instName] || {};
+      if (modCustom.comment) {
+        showCommentPopup(instName, modName, modCustom.comment, e.clientX, e.clientY);
+      } else {
+        closeCommentPopup();
+      }
     });
   });
 
@@ -799,7 +1020,9 @@ function renderCanvas() {
 
   // ── Click on background to deselect wire ──
   getSVG().addEventListener('click', e => {
+    if (state.justFinishedDrag) return; // Don't deselect after drag operations
     if (e.target === getSVG() || e.target.id === 'svg-root') {
+      // Don't clear box selection on background click — use close button
       if (state.selectedWireKey) {
         state.selectedWireKey = null;
         svgRoot.querySelectorAll('.wire-path.selected').forEach(p => p.classList.remove('selected'));
@@ -865,6 +1088,7 @@ function renderCanvas() {
       if (!wireKey) return;
       const pt = svgToDesignCoords(e.clientX, e.clientY);
       if (!pt) return;
+      pushUndoSnapshot();
       if (!state.wireWaypoints[tab.name]) state.wireWaypoints[tab.name] = {};
       if (!state.wireWaypoints[tab.name][wireKey]) state.wireWaypoints[tab.name][wireKey] = [];
       state.wireWaypoints[tab.name][wireKey].push({ x: pt.x, y: pt.y });
@@ -893,6 +1117,7 @@ function renderCanvas() {
       const wireKey = wp.getAttribute('data-wire-key');
       const wpIdx = parseInt(wp.getAttribute('data-wp-index'));
       if (state.wireWaypoints[tab.name]?.[wireKey]) {
+        pushUndoSnapshot();
         state.wireWaypoints[tab.name][wireKey].splice(wpIdx, 1);
         if (state.wireWaypoints[tab.name][wireKey].length === 0) {
           delete state.wireWaypoints[tab.name][wireKey];
@@ -925,6 +1150,11 @@ function renderCanvas() {
     applyTransform();
   } else if (state.pan.x === 0 && state.pan.y === 0 && state.zoom === 1) {
     setTimeout(fitToView, 50);
+  }
+
+  // Re-apply box selection highlights if active
+  if (state.boxSelection) {
+    setTimeout(() => renderBoxSelectionHighlight(), 20);
   }
 }
 
@@ -990,6 +1220,7 @@ function onModuleDragEnd(e) {
 
   const pt = svgToDesignCoords(e.clientX, e.clientY);
   if (pt) {
+    pushUndoSnapshot();
     const dx = pt.x - t.startDesignX;
     const dy = pt.y - t.startDesignY;
     const newX = t.origX + dx;
@@ -1008,6 +1239,8 @@ function onModuleDragEnd(e) {
   state.editMode = null;
   state.editTarget = null;
   $('canvas-container').style.cursor = 'grab';
+  state.justFinishedDrag = true;
+  setTimeout(() => { state.justFinishedDrag = false; }, 50);
   renderCanvas(); // re-render with wires reconnected
 }
 
@@ -1057,6 +1290,7 @@ function onModuleResizeEnd(e) {
 
   const pt = svgToDesignCoords(e.clientX, e.clientY);
   if (pt) {
+    pushUndoSnapshot();
     const dw = pt.x - t.startDesignX;
     const dh = pt.y - t.startDesignY;
     const newW = Math.max(LAYOUT.MODULE_MIN_WIDTH, t.origW + dw);
@@ -1074,6 +1308,8 @@ function onModuleResizeEnd(e) {
   state.editMode = null;
   state.editTarget = null;
   $('canvas-container').style.cursor = 'grab';
+  state.justFinishedDrag = true;
+  setTimeout(() => { state.justFinishedDrag = false; }, 50);
   renderCanvas();
 }
 
@@ -1111,6 +1347,7 @@ function onWaypointDragEnd(e) {
 
   const pt = svgToDesignCoords(e.clientX, e.clientY);
   if (pt) {
+    pushUndoSnapshot();
     const dx = pt.x - t.startDesignX;
     const dy = pt.y - t.startDesignY;
     const newX = t.origX + dx;
@@ -1126,6 +1363,8 @@ function onWaypointDragEnd(e) {
   state.editMode = null;
   state.editTarget = null;
   $('canvas-container').style.cursor = 'grab';
+  state.justFinishedDrag = true;
+  setTimeout(() => { state.justFinishedDrag = false; }, 50);
   renderCanvas();
 }
 
@@ -1165,6 +1404,12 @@ function updateInfoPanel(modName, modules) {
   if (!mod) { panel.style.display = 'none'; return; }
 
   panel.style.display = '';
+  // Hide settings button for default info view
+  const settingsBtn = $('info-settings');
+  if (settingsBtn) settingsBtn.style.display = 'none';
+  state.settingsTarget = null;
+
+  panel.style.display = '';
   const inP = mod.ports.filter(p => p.direction === 'input').length;
   const outP = mod.ports.filter(p => p.direction === 'output').length;
   const ioP = mod.ports.filter(p => p.direction === 'inout').length;
@@ -1183,6 +1428,11 @@ function showWireInfoPanel(wireKey, signal) {
   const panel = $('info-panel');
   const content = $('info-content');
   panel.style.display = '';
+
+  // Show settings button for wire customization
+  const settingsBtn = $('info-settings');
+  if (settingsBtn) settingsBtn.style.display = '';
+  state.settingsTarget = { type: 'wire', key: wireKey };
 
   // Parse wireKey: "inst.port→inst.port"
   const parts = wireKey.split('→');
@@ -1207,6 +1457,9 @@ function showWireInfoPanel(wireKey, signal) {
 
 function closeInfoPanel() {
   $('info-panel').style.display = 'none';
+  const settingsBtn = $('info-settings');
+  if (settingsBtn) settingsBtn.style.display = 'none';
+  state.settingsTarget = null;
 }
 
 // ─── Pan & Zoom ─────────────────────────────────────────────────────────
@@ -1222,6 +1475,18 @@ function initPanZoom() {
     // Only pan on background clicks
     const tag = e.target.tagName.toLowerCase();
     if (tag === 'svg' || e.target === container || e.target.id === 'main-svg') {
+      // Shift+click starts box selection
+      if (e.shiftKey) {
+        const pt = svgToDesignCoords(e.clientX, e.clientY);
+        if (pt) {
+          state.boxSelecting = true;
+          state.boxSelectStart = pt;
+          state.boxSelectCurrent = pt;
+          container.style.cursor = 'crosshair';
+          e.preventDefault();
+          return;
+        }
+      }
       state.dragging = true;
       state.dragStart = { x: e.clientX, y: e.clientY };
       state.panStart = { ...state.pan };
@@ -1235,6 +1500,16 @@ function initPanZoom() {
     if (state.editMode === 'drag-module') { onModuleDragMove(e); return; }
     if (state.editMode === 'resize-module') { onModuleResizeMove(e); return; }
     if (state.editMode === 'drag-waypoint') { onWaypointDragMove(e); return; }
+    if (state.editMode === 'drag-box-selection') { onBoxSelectionDragMove(e); return; }
+    // Box selecting (rubber-band)
+    if (state.boxSelecting) {
+      const pt = svgToDesignCoords(e.clientX, e.clientY);
+      if (pt) {
+        state.boxSelectCurrent = pt;
+        drawBoxSelectionRect();
+      }
+      return;
+    }
     // Normal pan
     if (!state.dragging) return;
     state.pan.x = state.panStart.x + (e.clientX - state.dragStart.x);
@@ -1247,10 +1522,18 @@ function initPanZoom() {
     if (state.editMode === 'drag-module') { onModuleDragEnd(e); return; }
     if (state.editMode === 'resize-module') { onModuleResizeEnd(e); return; }
     if (state.editMode === 'drag-waypoint') { onWaypointDragEnd(e); return; }
+    if (state.editMode === 'drag-box-selection') { onBoxSelectionDragEnd(e); return; }
+    // Box selection end
+    if (state.boxSelecting) {
+      finalizeBoxSelection();
+      return;
+    }
     // Normal pan end
     if (state.dragging) {
       state.dragging = false;
       $('canvas-container').style.cursor = 'grab';
+      state.justFinishedDrag = true;
+      setTimeout(() => { state.justFinishedDrag = false; }, 50);
       // Save view state
       if (state.activeTab) {
         saveViewState(state.activeTab, { pan: { ...state.pan }, zoom: state.zoom });
@@ -1275,6 +1558,23 @@ function initPanZoom() {
       saveViewState(state.activeTab, { pan: { ...state.pan }, zoom: state.zoom });
     }
   }, { passive: false });
+
+  // ── Keyboard shortcuts: Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo ──
+  document.addEventListener('keydown', e => {
+    // Don't intercept if user is typing in an input/textarea
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      doUndo();
+    } else if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+      e.preventDefault();
+      doRedo();
+    } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'Z') {
+      e.preventDefault();
+      doRedo();
+    }
+  });
 }
 
 function applyTransform() {
@@ -1303,6 +1603,681 @@ function fitToView() {
   } catch (e) {
     // getBBox can throw if element is not rendered
   }
+}
+
+// ─── Undo / Redo ────────────────────────────────────────────────────────
+
+function pushUndoSnapshot() {
+  const name = state.activeTab;
+  if (!name) return;
+  const snapshot = {
+    layoutOverrides: JSON.parse(JSON.stringify(state.layoutOverrides[name] || {})),
+    wireWaypoints: JSON.parse(JSON.stringify(state.wireWaypoints[name] || {})),
+  };
+  state.undoStack.push(snapshot);
+  if (state.undoStack.length > state.maxUndoHistory) {
+    state.undoStack.shift();
+  }
+  // Clear redo stack on new action
+  state.redoStack = [];
+}
+
+function doUndo() {
+  const name = state.activeTab;
+  if (!name || state.undoStack.length === 0) {
+    showToast('没有可撤销的操作', 'warn');
+    return;
+  }
+  // Save current state to redo stack
+  state.redoStack.push({
+    layoutOverrides: JSON.parse(JSON.stringify(state.layoutOverrides[name] || {})),
+    wireWaypoints: JSON.parse(JSON.stringify(state.wireWaypoints[name] || {})),
+  });
+
+  const snapshot = state.undoStack.pop();
+  state.layoutOverrides[name] = snapshot.layoutOverrides;
+  state.wireWaypoints[name] = snapshot.wireWaypoints;
+  saveLayout(name, state.layoutOverrides[name]);
+  saveWireWaypoints(name, state.wireWaypoints[name]);
+  renderCanvas();
+  showToast('已撤销', 'info');
+}
+
+function doRedo() {
+  const name = state.activeTab;
+  if (!name || state.redoStack.length === 0) {
+    showToast('没有可重做的操作', 'warn');
+    return;
+  }
+  // Save current state to undo stack
+  state.undoStack.push({
+    layoutOverrides: JSON.parse(JSON.stringify(state.layoutOverrides[name] || {})),
+    wireWaypoints: JSON.parse(JSON.stringify(state.wireWaypoints[name] || {})),
+  });
+
+  const snapshot = state.redoStack.pop();
+  state.layoutOverrides[name] = snapshot.layoutOverrides;
+  state.wireWaypoints[name] = snapshot.wireWaypoints;
+  saveLayout(name, state.layoutOverrides[name]);
+  saveWireWaypoints(name, state.wireWaypoints[name]);
+  renderCanvas();
+  showToast('已重做', 'info');
+}
+
+// ─── Settings / Customization Modal ─────────────────────────────────────
+
+function openSettingsPanel() {
+  const target = state.settingsTarget;
+  if (!target || !state.activeTab) return;
+
+  const customs = state.customizations[state.activeTab] || { modules: {}, wires: {} };
+  const content = $('settings-content');
+  content.innerHTML = '';
+
+  if (target.type === 'module') {
+    const existing = customs.modules?.[target.key] || {};
+    content.innerHTML = `
+      <h4 style="color:#c9d1d9;margin-bottom:12px;">模块设置: ${target.key}</h4>
+      <div class="settings-row">
+        <label>颜色</label>
+        <input type="color" id="set-mod-color" value="${existing.color || '#1c2333'}" />
+        <button class="btn-secondary" onclick="document.getElementById('set-mod-color').value='#1c2333'" style="padding:4px 8px;font-size:11px;">重置</button>
+      </div>
+      <div class="settings-row">
+        <label>重命名</label>
+        <input type="text" id="set-mod-rename" placeholder="自定义显示名称..." value="${existing.rename || ''}" />
+      </div>
+      <div class="settings-row">
+        <label>注释</label>
+        <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
+          <textarea id="set-mod-comment" placeholder="支持 Markdown 格式...">${existing.comment || ''}</textarea>
+          <button class="btn-secondary" onclick="document.getElementById('comment-file-input').click()" style="align-self:flex-start;padding:4px 10px;font-size:11px;">📂 导入 .md 文件</button>
+        </div>
+      </div>`;
+  } else if (target.type === 'wire') {
+    const existing = customs.wires?.[target.key] || {};
+    content.innerHTML = `
+      <h4 style="color:#c9d1d9;margin-bottom:12px;">线路设置: ${target.key}</h4>
+      <div class="settings-row">
+        <label>颜色</label>
+        <input type="color" id="set-wire-color" value="${existing.color || '#4fc3f7'}" />
+        <button class="btn-secondary" onclick="document.getElementById('set-wire-color').value='#4fc3f7'" style="padding:4px 8px;font-size:11px;">重置</button>
+      </div>`;
+  }
+
+  $('settings-overlay').style.display = 'flex';
+}
+
+function closeSettingsModal() {
+  $('settings-overlay').style.display = 'none';
+}
+
+// ─── Module Info Popup (right-click) ─────────────────────────────────────
+
+// Track last context for "open comment" button in info popup
+let _moduleInfoPopupCtx = null;
+
+function showModuleInfoPopup(instName, modName, modCustom, inP, outP, clientX, clientY) {
+  const popup = $('module-info-popup');
+  if (!popup) return;
+  _moduleInfoPopupCtx = { instName, modName, modCustom };
+
+  const title = $('module-info-popup-title');
+  if (title) title.textContent = modCustom.rename ? `${modCustom.rename} (${instName} : ${modName})` : `${instName} : ${modName}`;
+
+  const body = $('module-info-popup-body');
+  if (body) {
+    body.innerHTML = `<div class="info-row">
+      <span class="info-label">输入:</span><span class="info-val" style="color:#81c784">${inP}</span>
+      &nbsp;<span class="info-label">输出:</span><span class="info-val" style="color:#ef5350">${outP}</span>
+      ${modCustom.color ? `&nbsp;<span class="info-label">颜色:</span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${modCustom.color};vertical-align:middle;"></span>` : ''}
+    </div>`;
+  }
+
+  // Show "注释" button only if comment exists
+  const commentBtn = $('module-info-popup-comment-btn');
+  if (commentBtn) commentBtn.style.display = modCustom.comment ? '' : 'none';
+
+  // Position
+  popup.style.display = 'block';
+  const pw = popup.offsetWidth || 240;
+  const ph = popup.offsetHeight || 80;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let left = clientX + 4;
+  let top = clientY + 4;
+  if (left + pw > vw - 8) left = clientX - pw - 4;
+  if (top + ph > vh - 8) top = vh - ph - 8;
+  if (left < 8) left = 8;
+  if (top < 8) top = 8;
+  popup.style.left = left + 'px';
+  popup.style.top = top + 'px';
+}
+
+function closeModuleInfoPopup() {
+  const popup = $('module-info-popup');
+  if (popup) popup.style.display = 'none';
+}
+
+function openSettingsFromInfoPopup() {
+  closeModuleInfoPopup();
+  openSettingsPanel();
+}
+
+function openCommentFromInfoPopup() {
+  if (!_moduleInfoPopupCtx) return;
+  const { instName, modName, modCustom } = _moduleInfoPopupCtx;
+  if (!modCustom.comment) return;
+  const popup = $('module-info-popup');
+  const x = popup ? (parseInt(popup.style.left) || 100) : 100;
+  const y = popup ? (parseInt(popup.style.top) || 100) : 100;
+  closeModuleInfoPopup();
+  showCommentPopup(instName, modName, modCustom.comment, x, y);
+}
+
+// ─── Comment Popup ────────────────────────────────────────────────────────
+
+/**
+ * Show a floating Markdown comment popup near the clicked module.
+ * Uses marked.js for rendering if available, otherwise shows plain text.
+ * Size is persisted in localStorage and restored on next open.
+ */
+function showCommentPopup(instName, modName, commentMd, clientX, clientY) {
+  const popup = $('comment-popup');
+  if (!popup) return;
+
+  const titleEl = $('comment-popup-title');
+  const contentEl = $('comment-popup-content');
+  if (titleEl) titleEl.textContent = `${instName} : ${modName}`;
+
+  // Render markdown
+  if (contentEl) {
+    if (window.marked) {
+      contentEl.innerHTML = window.marked.parse(commentMd);
+    } else {
+      // Fallback: minimal inline renderer (bold, italic, code, headers)
+      let html = commentMd
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+        .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+        .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/^- (.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
+        .replace(/\n\n/g, '</p><p>')
+        .replace(/^(?!<[hul])/gm, '');
+      contentEl.innerHTML = `<p>${html}</p>`;
+    }
+  }
+
+  // Restore saved size
+  const savedSize = loadCommentPopupSize();
+  popup.style.width = savedSize.w + 'px';
+  popup.style.height = savedSize.h + 'px';
+
+  // Position popup near the click, keeping within viewport
+  popup.style.display = 'flex';
+  const pw = savedSize.w;
+  const ph = savedSize.h;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let left = clientX + 12;
+  let top = clientY + 12;
+  if (left + pw > vw - 16) left = clientX - pw - 12;
+  if (top + ph > vh - 16) top = vh - ph - 16;
+  if (left < 8) left = 8;
+  if (top < 8) top = 8;
+  popup.style.left = left + 'px';
+  popup.style.top = top + 'px';
+
+  // Attach resize handle (idempotent)
+  initCommentPopupResize(popup);
+}
+
+function closeCommentPopup() {
+  const popup = $('comment-popup');
+  if (popup) popup.style.display = 'none';
+}
+
+/**
+ * Attach drag-to-resize behavior to the #comment-popup-resize handle.
+ * Runs only once (guarded by a flag on the element).
+ * Saves final size to localStorage on mouseup.
+ */
+function initCommentPopupResize(popup) {
+  const handle = $('comment-popup-resize');
+  if (!handle || handle._resizeAttached) return;
+  handle._resizeAttached = true;
+
+  handle.addEventListener('mousedown', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startW = popup.offsetWidth;
+    const startH = popup.offsetHeight;
+
+    const onMove = (ev) => {
+      const newW = Math.max(220, startW + ev.clientX - startX);
+      const newH = Math.max(120, startH + ev.clientY - startY);
+      popup.style.width = newW + 'px';
+      popup.style.height = newH + 'px';
+    };
+    const onUp = (ev) => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      const finalW = popup.offsetWidth;
+      const finalH = popup.offsetHeight;
+      saveCommentPopupSize(finalW, finalH);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
+/**
+ * Handle importing a .md file as module comment.
+ * Fills the comment textarea in the settings modal, and saves a copy
+ * server-side at data/<design_name>/<inst_name>.md.
+ */
+function handleCommentFileImport(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const content = e.target.result;
+    const textarea = $('set-mod-comment');
+    if (textarea) textarea.value = content;
+
+    // Save to server under data/<designName>/<instName>.md
+    const designName = state.activeTab;
+    const instName = state.settingsTarget?.key;
+    if (designName && instName) {
+      fetch('/api/save_comment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ design_name: designName, inst_name: instName, content }),
+      })
+        .then(r => r.json())
+        .then(res => {
+          if (res.success) showToast(`已导入并保存 ${file.name}`, 'success');
+          else showToast('保存失败: ' + (res.error || ''), 'error');
+        })
+        .catch(() => showToast(`已导入 ${file.name}（保存失败）`, 'warn'));
+    } else {
+      showToast(`已导入 ${file.name}`, 'success');
+    }
+  };
+  reader.onerror = () => showToast('文件读取失败', 'error');
+  reader.readAsText(file);
+  // Reset input so same file can be imported again
+  event.target.value = '';
+}
+
+function applySettings() {
+  const target = state.settingsTarget;
+  if (!target || !state.activeTab) return;
+
+  if (!state.customizations[state.activeTab]) {
+    state.customizations[state.activeTab] = { modules: {}, wires: {} };
+  }
+  const customs = state.customizations[state.activeTab];
+
+  if (target.type === 'module') {
+    const color = $('set-mod-color')?.value;
+    const rename = $('set-mod-rename')?.value?.trim() || '';
+    const comment = $('set-mod-comment')?.value?.trim() || '';
+    if (!customs.modules) customs.modules = {};
+    customs.modules[target.key] = {};
+    if (color && color !== '#1c2333') customs.modules[target.key].color = color;
+    if (rename) customs.modules[target.key].rename = rename;
+    if (comment) customs.modules[target.key].comment = comment;
+    // Clean empty entries
+    if (Object.keys(customs.modules[target.key]).length === 0) {
+      delete customs.modules[target.key];
+    }
+  } else if (target.type === 'wire') {
+    const color = $('set-wire-color')?.value;
+    if (!customs.wires) customs.wires = {};
+    if (color && color !== '#4fc3f7') {
+      customs.wires[target.key] = { color };
+    } else {
+      delete customs.wires[target.key];
+    }
+  }
+
+  saveCustomizations(state.activeTab, customs);
+  closeSettingsModal();
+  renderCanvas();
+  showToast('设置已应用', 'success');
+}
+
+// ─── Box Selection ──────────────────────────────────────────────────────
+
+function drawBoxSelectionRect() {
+  let rect = document.getElementById('box-select-rect');
+  if (!rect) {
+    rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.id = 'box-select-rect';
+    rect.setAttribute('fill', 'rgba(31,111,235,0.15)');
+    rect.setAttribute('stroke', '#58a6ff');
+    rect.setAttribute('stroke-width', 1.5 / state.zoom);
+    rect.setAttribute('stroke-dasharray', `${4/state.zoom},${3/state.zoom}`);
+    rect.setAttribute('pointer-events', 'none');
+    const designRoot = getSVGRoot().querySelector('#design-root');
+    if (designRoot) designRoot.appendChild(rect);
+  }
+  const s = state.boxSelectStart;
+  const c = state.boxSelectCurrent;
+  const x = Math.min(s.x, c.x);
+  const y = Math.min(s.y, c.y);
+  const w = Math.abs(c.x - s.x);
+  const h = Math.abs(c.y - s.y);
+  rect.setAttribute('x', x);
+  rect.setAttribute('y', y);
+  rect.setAttribute('width', w);
+  rect.setAttribute('height', h);
+}
+
+function finalizeBoxSelection() {
+  state.boxSelecting = false;
+  $('canvas-container').style.cursor = 'grab';
+
+  const s = state.boxSelectStart;
+  const c = state.boxSelectCurrent;
+  const selX1 = Math.min(s.x, c.x);
+  const selY1 = Math.min(s.y, c.y);
+  const selX2 = Math.max(s.x, c.x);
+  const selY2 = Math.max(s.y, c.y);
+
+  // Remove rubber-band rect
+  const rect = document.getElementById('box-select-rect');
+  if (rect) rect.remove();
+
+  // Too small = just a click, clear selection
+  if (Math.abs(selX2 - selX1) < 5 && Math.abs(selY2 - selY1) < 5) {
+    clearBoxSelection();
+    return;
+  }
+
+  // Find modules within the selection rectangle
+  const selectedModules = new Set();
+  const selectedWaypoints = [];
+  const svgRoot = getSVGRoot();
+
+  svgRoot.querySelectorAll('.module-box').forEach(box => {
+    const instName = box.getAttribute('data-instance');
+    if (!instName) return;
+    const transform = box.getAttribute('transform');
+    const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
+    if (!match) return;
+    const mx = parseFloat(match[1]);
+    const my = parseFloat(match[2]);
+    const mRect = box.querySelector('.module-rect');
+    const mw = mRect ? parseFloat(mRect.getAttribute('width')) : 150;
+    const mh = mRect ? parseFloat(mRect.getAttribute('height')) : 100;
+
+    // Check if module center is within selection
+    const cx = mx + mw / 2;
+    const cy = my + mh / 2;
+    if (cx >= selX1 && cx <= selX2 && cy >= selY1 && cy <= selY2) {
+      selectedModules.add(instName);
+    }
+  });
+
+  svgRoot.querySelectorAll('.wire-waypoint').forEach(wp => {
+    const wxc = parseFloat(wp.getAttribute('cx'));
+    const wyc = parseFloat(wp.getAttribute('cy'));
+    if (wxc >= selX1 && wxc <= selX2 && wyc >= selY1 && wyc <= selY2) {
+      selectedWaypoints.push({
+        wireKey: wp.getAttribute('data-wire-key'),
+        idx: parseInt(wp.getAttribute('data-wp-index')),
+      });
+    }
+  });
+
+  if (selectedModules.size === 0 && selectedWaypoints.length === 0) {
+    clearBoxSelection();
+    return;
+  }
+
+  state.boxSelection = { items: selectedModules, waypoints: selectedWaypoints };
+  renderBoxSelectionHighlight();
+}
+
+function renderBoxSelectionHighlight() {
+  if (!state.boxSelection) return;
+  const svgRoot = getSVGRoot();
+
+  // Highlight selected modules
+  svgRoot.querySelectorAll('.module-box').forEach(box => {
+    const instName = box.getAttribute('data-instance');
+    if (state.boxSelection.items.has(instName)) {
+      box.classList.add('box-selected');
+    } else {
+      box.classList.remove('box-selected');
+    }
+  });
+
+  // Highlight selected waypoints
+  svgRoot.querySelectorAll('.wire-waypoint').forEach(wp => {
+    const wk = wp.getAttribute('data-wire-key');
+    const idx = parseInt(wp.getAttribute('data-wp-index'));
+    const isSelected = state.boxSelection.waypoints.some(w => w.wireKey === wk && w.idx === idx);
+    if (isSelected) {
+      wp.setAttribute('fill', '#ffeb3b');
+      wp.setAttribute('r', 7);
+    }
+  });
+
+  // Add close button overlay
+  removeBoxSelectionCloseBtn();
+  const designRoot = getSVGRoot().querySelector('#design-root');
+  if (!designRoot) return;
+
+  // Find bounding box of selected items
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  svgRoot.querySelectorAll('.module-box.box-selected').forEach(box => {
+    const transform = box.getAttribute('transform');
+    const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
+    if (!match) return;
+    const mx = parseFloat(match[1]);
+    const my = parseFloat(match[2]);
+    const mRect = box.querySelector('.module-rect');
+    const mw = mRect ? parseFloat(mRect.getAttribute('width')) : 150;
+    const mh = mRect ? parseFloat(mRect.getAttribute('height')) : 100;
+    minX = Math.min(minX, mx);
+    minY = Math.min(minY, my);
+    maxX = Math.max(maxX, mx + mw);
+    maxY = Math.max(maxY, my + mh);
+  });
+
+  state.boxSelection.waypoints.forEach(wpRef => {
+    const wps = state.wireWaypoints[state.activeTab]?.[wpRef.wireKey];
+    if (wps?.[wpRef.idx]) {
+      const wp = wps[wpRef.idx];
+      minX = Math.min(minX, wp.x - 10);
+      minY = Math.min(minY, wp.y - 10);
+      maxX = Math.max(maxX, wp.x + 10);
+      maxY = Math.max(maxY, wp.y + 10);
+    }
+  });
+
+  if (minX === Infinity) return;
+
+  // Draw selection bounding box
+  const pad = 10;
+  const selBorder = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  selBorder.id = 'box-selection-border';
+  selBorder.setAttribute('x', minX - pad);
+  selBorder.setAttribute('y', minY - pad);
+  selBorder.setAttribute('width', maxX - minX + pad * 2);
+  selBorder.setAttribute('height', maxY - minY + pad * 2);
+  selBorder.setAttribute('fill', 'none');
+  selBorder.setAttribute('stroke', '#58a6ff');
+  selBorder.setAttribute('stroke-width', 2 / state.zoom);
+  selBorder.setAttribute('stroke-dasharray', `${6/state.zoom},${3/state.zoom}`);
+  selBorder.setAttribute('rx', 4);
+  selBorder.setAttribute('pointer-events', 'none');
+  designRoot.appendChild(selBorder);
+
+  // Close button (X) at top-right of selection box
+  const closeBtnSize = 18 / state.zoom;
+  const closeG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  closeG.id = 'box-selection-close';
+  closeG.style.cursor = 'pointer';
+
+  const closeBg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  closeBg.setAttribute('cx', maxX + pad);
+  closeBg.setAttribute('cy', minY - pad);
+  closeBg.setAttribute('r', closeBtnSize / 2);
+  closeBg.setAttribute('fill', '#da3633');
+  closeBg.setAttribute('stroke', '#0d1117');
+  closeBg.setAttribute('stroke-width', 1.5 / state.zoom);
+  closeG.appendChild(closeBg);
+
+  const closeTxt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  closeTxt.setAttribute('x', maxX + pad);
+  closeTxt.setAttribute('y', minY - pad + closeBtnSize * 0.15);
+  closeTxt.setAttribute('text-anchor', 'middle');
+  closeTxt.setAttribute('fill', '#fff');
+  closeTxt.setAttribute('font-size', closeBtnSize * 0.7);
+  closeTxt.setAttribute('font-weight', 'bold');
+  closeTxt.setAttribute('pointer-events', 'none');
+  closeTxt.textContent = '✕';
+  closeG.appendChild(closeTxt);
+
+  closeG.addEventListener('click', (e) => {
+    e.stopPropagation();
+    clearBoxSelection();
+  });
+
+  designRoot.appendChild(closeG);
+
+  // Make the selection border draggable for group move
+  selBorder.setAttribute('pointer-events', 'all');
+  selBorder.style.cursor = 'move';
+  selBorder.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    startBoxSelectionDrag(e);
+  });
+}
+
+function removeBoxSelectionCloseBtn() {
+  const border = document.getElementById('box-selection-border');
+  if (border) border.remove();
+  const closeBtn = document.getElementById('box-selection-close');
+  if (closeBtn) closeBtn.remove();
+}
+
+function clearBoxSelection() {
+  state.boxSelection = null;
+  removeBoxSelectionCloseBtn();
+  const svgRoot = getSVGRoot();
+  svgRoot.querySelectorAll('.module-box.box-selected').forEach(box => {
+    box.classList.remove('box-selected');
+  });
+}
+
+function startBoxSelectionDrag(e) {
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  if (!pt) return;
+  state.editMode = 'drag-box-selection';
+  state.editTarget = {
+    startDesignX: pt.x,
+    startDesignY: pt.y,
+    origPositions: {},
+    origWaypoints: {},
+  };
+
+  // Store original positions of all selected modules
+  const svgRoot = getSVGRoot();
+  if (state.boxSelection) {
+    state.boxSelection.items.forEach(instName => {
+      const box = svgRoot.querySelector(`.module-box[data-instance="${instName}"]`);
+      if (box) {
+        const transform = box.getAttribute('transform');
+        const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
+        if (match) {
+          state.editTarget.origPositions[instName] = { x: parseFloat(match[1]), y: parseFloat(match[2]), boxEl: box };
+        }
+      }
+    });
+    state.boxSelection.waypoints.forEach(wpRef => {
+      const key = `${wpRef.wireKey}:${wpRef.idx}`;
+      const wps = state.wireWaypoints[state.activeTab]?.[wpRef.wireKey];
+      if (wps?.[wpRef.idx]) {
+        state.editTarget.origWaypoints[key] = { ...wps[wpRef.idx], wireKey: wpRef.wireKey, idx: wpRef.idx };
+      }
+    });
+  }
+  $('canvas-container').style.cursor = 'move';
+}
+
+function onBoxSelectionDragMove(e) {
+  const t = state.editTarget;
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  if (!pt || !t) return;
+  const dx = pt.x - t.startDesignX;
+  const dy = pt.y - t.startDesignY;
+
+  // Move all selected modules
+  for (const [instName, orig] of Object.entries(t.origPositions)) {
+    orig.boxEl.setAttribute('transform', `translate(${orig.x + dx}, ${orig.y + dy})`);
+  }
+  // Move all selected waypoints visually
+  const svgRoot = getSVGRoot();
+  for (const [key, orig] of Object.entries(t.origWaypoints)) {
+    const wp = svgRoot.querySelector(`.wire-waypoint[data-wire-key="${orig.wireKey}"][data-wp-index="${orig.idx}"]`);
+    if (wp) {
+      wp.setAttribute('cx', orig.x + dx);
+      wp.setAttribute('cy', orig.y + dy);
+    }
+  }
+}
+
+function onBoxSelectionDragEnd(e) {
+  const t = state.editTarget;
+  if (!t) return;
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  const designName = state.activeTab;
+
+  if (pt) {
+    pushUndoSnapshot();
+    const dx = pt.x - t.startDesignX;
+    const dy = pt.y - t.startDesignY;
+
+    // Persist module positions
+    if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
+    for (const [instName, orig] of Object.entries(t.origPositions)) {
+      const ovr = state.layoutOverrides[designName][instName] || {};
+      ovr.x = orig.x + dx - 50;
+      ovr.y = orig.y + dy - 50;
+      state.layoutOverrides[designName][instName] = ovr;
+    }
+    saveLayout(designName, state.layoutOverrides[designName]);
+
+    // Persist waypoint positions
+    for (const [key, orig] of Object.entries(t.origWaypoints)) {
+      if (state.wireWaypoints[designName]?.[orig.wireKey]?.[orig.idx]) {
+        state.wireWaypoints[designName][orig.wireKey][orig.idx] = { x: orig.x + dx, y: orig.y + dy };
+      }
+    }
+    saveWireWaypoints(designName, state.wireWaypoints[designName]);
+  }
+
+  state.editMode = null;
+  state.editTarget = null;
+  $('canvas-container').style.cursor = 'grab';
+  state.justFinishedDrag = true;
+  setTimeout(() => { state.justFinishedDrag = false; }, 50);
+  renderCanvas();
+  // Re-highlight selection after re-render
+  setTimeout(() => renderBoxSelectionHighlight(), 50);
 }
 
 // ─── Export ─────────────────────────────────────────────────────────────
@@ -1350,8 +2325,14 @@ function buildExportSVG() {
   // Restore original transform
   designRoot.setAttribute('transform', savedTransform);
 
+  // Background color for export
+  const bgColor = state.canvasBgColor;
+  const bgRect = (bgColor && bgColor !== 'transparent')
+    ? `<rect x="${vbX}" y="${vbY}" width="${vbW}" height="${vbH}" fill="${bgColor}"/>`
+    : '';
+
   // Build standalone SVG
-  const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vbX} ${vbY} ${vbW} ${vbH}" width="${vbW}" height="${vbH}" style="background:#0d1117;">
+  const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vbX} ${vbY} ${vbW} ${vbH}" width="${vbW}" height="${vbH}">
   <style>
     .module-rect { rx: 6; ry: 6; }
     .module-title { font-family: 'Segoe UI', sans-serif; font-weight: 600; fill: #e6edf3; font-size: 14px; }
@@ -1363,6 +2344,7 @@ function buildExportSVG() {
     text { font-family: 'Segoe UI', sans-serif; }
   </style>
   ${origDefs ? new XMLSerializer().serializeToString(origDefs) : ''}
+  ${bgRect}
   ${new XMLSerializer().serializeToString(clonedRoot)}
 </svg>`;
 
@@ -1410,8 +2392,12 @@ function doExportPNG() {
   canvas.width = canvasW;
   canvas.height = canvasH;
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#0d1117';
-  ctx.fillRect(0, 0, canvasW, canvasH);
+  // Fill background if not transparent
+  if (state.canvasBgColor && state.canvasBgColor !== 'transparent') {
+    ctx.fillStyle = state.canvasBgColor;
+    ctx.fillRect(0, 0, canvasW, canvasH);
+  }
+  // else: transparent (default canvas is transparent)
 
   const img = new Image();
   const svgBlob = new Blob([exportData.svgStr], { type: 'image/svg+xml;charset=utf-8' });
