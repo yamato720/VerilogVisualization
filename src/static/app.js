@@ -242,6 +242,7 @@ window.refreshDesign = refreshDesign;
 window.openSettingsPanel = openSettingsPanel;
 window.closeSettingsModal = closeSettingsModal;
 window.applySettings = applySettings;
+window.vvSwitchSettingsTab = vvSwitchSettingsTab;
 window.closeCommentPopup = closeCommentPopup;
 window.handleCommentFileImport = handleCommentFileImport;
 window.setCanvasBgColor = setCanvasBgColor;
@@ -1105,18 +1106,13 @@ function renderCanvas() {
       renderCanvas();
     });
 
-    // Right-click: show floating module info popup with settings entry
+    // Right-click: open settings panel directly
     box.addEventListener('contextmenu', e => {
       e.preventDefault();
       e.stopPropagation();
       if (!instName) return;
       state.settingsTarget = { type: 'module', key: instName, modName };
-      const customs = state.customizations[tab.name] || { modules: {} };
-      const modCustom = customs.modules?.[instName] || {};
-      const mod = modules[modName];
-      const inP = mod?.ports?.filter(p => p.direction === 'input').length || 0;
-      const outP = mod?.ports?.filter(p => p.direction === 'output').length || 0;
-      showModuleInfoPopup(instName, modName, modCustom, inP, outP, e.clientX, e.clientY);
+      openSettingsPanel();
     });
 
     // Click on ⚙ settings icon → open settings panel directly
@@ -2090,49 +2086,59 @@ function openSettingsPanel() {
     const inPorts = mod?.ports?.filter(p => p.direction === 'input') || [];
     const outPorts = mod?.ports?.filter(p => p.direction === 'output') || [];
 
-    // Build port info HTML
+    // Build port info HTML (shown on 端口 tab)
     let portInfoHtml = '';
     if (inPorts.length || outPorts.length) {
       const portRow = (p) => {
         const w = p.width > 1 ? `[${(p.msb !== undefined ? p.msb : p.width - 1)}:${p.lsb !== undefined ? p.lsb : 0}]` : '';
         return `<tr><td style="color:#c9d1d9;font-family:monospace;font-size:11px;padding:2px 8px 2px 0;">${p.name}</td><td style="color:#8b949e;font-size:11px;padding:2px 0;">${w || '1 bit'}</td></tr>`;
       };
-      portInfoHtml = `<div style="margin-top:14px;border-top:1px solid #30363d;padding-top:10px;">
-        <h4 style="color:#8b949e;margin-bottom:8px;font-size:12px;">端口信息 (${modName})</h4>`;
       if (inPorts.length) {
-        portInfoHtml += `<div style="margin-bottom:8px;"><span style="color:#81c784;font-size:11px;font-weight:600;">⬇ 输入 (${inPorts.length})</span>
+        portInfoHtml += `<div style="margin-bottom:10px;"><span style="color:#81c784;font-size:11px;font-weight:600;">⬇ 输入 (${inPorts.length})</span>
           <table style="margin-top:4px;">${inPorts.map(portRow).join('')}</table></div>`;
       }
       if (outPorts.length) {
         portInfoHtml += `<div><span style="color:#ef5350;font-size:11px;font-weight:600;">⬆ 输出 (${outPorts.length})</span>
           <table style="margin-top:4px;">${outPorts.map(portRow).join('')}</table></div>`;
       }
-      portInfoHtml += '</div>';
+    } else {
+      portInfoHtml = `<div style="color:#484f58;font-size:12px;font-style:italic;">无端口信息</div>`;
     }
 
+    const hasPorts = inPorts.length + outPorts.length > 0;
+
     content.innerHTML = `
-      <h4 style="color:#c9d1d9;margin-bottom:12px;">模块设置: ${target.key}</h4>
-      <div class="settings-row">
-        <label>颜色</label>
-        <input type="color" id="set-mod-color" value="${modColor}" oninput="document.getElementById('set-mod-color-hex').value=this.value" />
-        <input type="text" id="set-mod-color-hex" value="${modColor}" maxlength="7" placeholder="#rrggbb"
-          style="width:70px;padding:4px 6px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:12px;font-family:monospace;"
-          oninput="if(/^#[0-9a-fA-F]{6}$/.test(this.value))document.getElementById('set-mod-color').value=this.value" />
-        <button class="btn-secondary" onclick="document.getElementById('set-mod-color').value='#1c2333';document.getElementById('set-mod-color-hex').value='#1c2333'" style="padding:4px 8px;font-size:11px;">重置</button>
+      <h4 style="color:#c9d1d9;margin-bottom:8px;">模块设置: ${target.key}</h4>
+      <div class="bd-cust-tabs" style="margin-bottom:10px;">
+        <button class="bd-cust-tab bd-cust-tab-active" onclick="vvSwitchSettingsTab(this,'vv-tab-basic')">基本设置</button>
+        <button class="bd-cust-tab" onclick="vvSwitchSettingsTab(this,'vv-tab-ports')">端口信息${hasPorts ? ` (${inPorts.length}/${outPorts.length})` : ''}</button>
       </div>
-      ${buildSwatches('set-mod-color')}
-      <div class="settings-row" style="margin-top:10px;">
-        <label>重命名</label>
-        <input type="text" id="set-mod-rename" placeholder="自定义显示名称..." value="${existing.rename || ''}" />
-      </div>
-      <div class="settings-row settings-row-grow">
-        <label>注释</label>
-        <div style="flex:1;display:flex;flex-direction:column;gap:6px;min-height:0;">
-          <textarea id="set-mod-comment" placeholder="支持 Markdown 格式..." style="flex:1;resize:none;min-height:60px;">${existing.comment || ''}</textarea>
-          <button class="btn-secondary" onclick="document.getElementById('comment-file-input').click()" style="align-self:flex-start;padding:4px 10px;font-size:11px;">📂 导入 .md 文件</button>
+      <div id="vv-tab-basic" style="display:flex;flex-direction:column;flex:1;min-height:0;">
+        <div class="settings-row">
+          <label>颜色</label>
+          <input type="color" id="set-mod-color" value="${modColor}" oninput="document.getElementById('set-mod-color-hex').value=this.value" />
+          <input type="text" id="set-mod-color-hex" value="${modColor}" maxlength="7" placeholder="#rrggbb"
+            style="width:70px;padding:4px 6px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:12px;font-family:monospace;"
+            oninput="if(/^#[0-9a-fA-F]{6}$/.test(this.value))document.getElementById('set-mod-color').value=this.value" />
+          <button class="btn-secondary" onclick="document.getElementById('set-mod-color').value='#1c2333';document.getElementById('set-mod-color-hex').value='#1c2333'" style="padding:4px 8px;font-size:11px;">重置</button>
+        </div>
+        ${buildSwatches('set-mod-color')}
+        <div class="settings-row" style="margin-top:10px;">
+          <label>重命名</label>
+          <input type="text" id="set-mod-rename" placeholder="自定义显示名称..." value="${existing.rename || ''}" />
+        </div>
+        <div class="settings-row settings-row-grow">
+          <label>注释</label>
+          <div style="flex:1;display:flex;flex-direction:column;gap:6px;min-height:0;">
+            <textarea id="set-mod-comment" placeholder="支持 Markdown 格式..." style="flex:1;resize:none;min-height:60px;">${existing.comment || ''}</textarea>
+            <button class="btn-secondary" onclick="document.getElementById('comment-file-input').click()" style="align-self:flex-start;padding:4px 10px;font-size:11px;">📂 导入 .md 文件</button>
+          </div>
         </div>
       </div>
-      ${portInfoHtml}`;
+      <div id="vv-tab-ports" style="display:none;overflow-y:auto;flex:1;padding-top:4px;">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:8px;">模块: ${modName}</div>
+        ${portInfoHtml}
+      </div>`;
   } else if (target.type === 'wire') {
     const existing = customs.wires?.[target.key] || {};
     const wireColor = existing.color || '#4fc3f7';
@@ -2163,6 +2169,19 @@ function openSettingsPanel() {
 
 function closeSettingsModal() {
   $('settings-overlay').style.display = 'none';
+}
+
+function vvSwitchSettingsTab(btn, panelId) {
+  const content = $('settings-content');
+  if (!content) return;
+  content.querySelectorAll('.bd-cust-tab').forEach(t => t.classList.remove('bd-cust-tab-active'));
+  btn.classList.add('bd-cust-tab-active');
+  ['vv-tab-basic', 'vv-tab-ports'].forEach(id => {
+    const el = content.querySelector('#' + id);
+    if (el) el.style.display = id === panelId ? 'flex' : 'none';
+    // ports tab uses block scroll, not flex
+    if (el && id === panelId && id === 'vv-tab-ports') el.style.display = 'block';
+  });
 }
 
 // ─── Module Info Popup (right-click) ─────────────────────────────────────

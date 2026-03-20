@@ -481,8 +481,19 @@ body {
 .module-title { font-family: 'Segoe UI', sans-serif; font-weight: 600; fill: #e6edf3; font-size: 14px; }
 .active-low-circle { fill: none; stroke: #ef5350; stroke-width: 1.5; }
 .expand-indicator { font-size: 12px; fill: #58a6ff; cursor: pointer; }
-.module-settings-icon { fill: #8b949e; cursor: pointer; }
-.module-settings-icon:hover { fill: #c9d1d9; }
+.module-settings-icon { cursor: pointer; pointer-events: all; }
+.module-settings-icon text { fill: #8b949e; }
+.module-settings-icon:hover text { fill: #c9d1d9; }
+.module-settings-icon .module-settings-icon-border { stroke: transparent; }
+.module-settings-icon:hover .module-settings-icon-border { stroke: #58a6ff; }
+#vv-tab-basic { flex: 1; min-height: 0; flex-direction: column; }
+#vv-tab-basic > * { flex-shrink: 0; }
+#vv-tab-basic > .settings-row-grow {
+  flex: 1; min-height: 0; align-items: stretch;
+}
+#vv-tab-basic > .settings-row-grow > label { align-self: flex-start; margin-top: 5px; }
+#vv-tab-basic > .settings-row-grow textarea { flex: 1; resize: none; min-height: 60px; }
+#vv-tab-ports { overflow-y: auto; }
 
 /* Scrollbars — universal consistent dark theme scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }

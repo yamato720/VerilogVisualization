@@ -163,6 +163,10 @@ VerilogVisualization/
 
 ---
 
+## ☕ 赞助
+是vibe coding的产物，如果觉得有帮助就给个star⭐吧。
+![Screenshot](img/sponsor.png)
+
 ## 📝 许可证
 
 MIT

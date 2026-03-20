@@ -21,6 +21,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERILOG_DATA_DIR = os.path.join(BASE_DIR, 'data', 'VerilogVisualization')
 CHISEL_DATA_DIR = os.path.join(BASE_DIR, 'data', 'ChiselEdit')
 DATA_DIR = VERILOG_DATA_DIR  # backward compat alias for existing Verilog endpoints
+# Auto-create data directories if they don't exist
+os.makedirs(VERILOG_DATA_DIR, exist_ok=True)
+os.makedirs(CHISEL_DATA_DIR, exist_ok=True)
 IMPORT_SCALA_PATH = os.path.join(BASE_DIR, 'import.scala')
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
