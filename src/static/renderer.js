@@ -215,16 +215,30 @@ function renderModuleBox(mod, x, y, opts = {}) {
     g.appendChild(ei);
   }
 
-  // Settings gear icon (for non-top instances)
+  // Settings gear button (for non-top instances) — uses a <g> so pointer-events work
   if (instName) {
     const hasExpand = mod.instances && mod.instances.length > 0;
-    const gearX = hasExpand ? W - 24 : W - 8;
-    const gear = svgEl('text', {
-      class: 'module-settings-icon', x: gearX, y: LAYOUT.MODULE_HEADER_H / 2 + 4,
-      'text-anchor': 'end', fill: '#8b949e', 'font-size': 11, style: 'cursor:pointer;',
+    const btnW = 18, btnH = 14;
+    const gearCX = hasExpand ? W - 28 : W - 12;
+    const gearCY = LAYOUT.MODULE_HEADER_H / 2;
+    const gearG = svgEl('g', {
+      class: 'module-settings-icon',
+      style: 'cursor:pointer;',
+      transform: `translate(${gearCX - btnW / 2}, ${gearCY - btnH / 2})`,
     });
-    gear.textContent = '⚙';
-    g.appendChild(gear);
+    // Transparent hit area
+    gearG.appendChild(svgEl('rect', { x: 0, y: 0, width: btnW, height: btnH, rx: 3, fill: 'transparent' }));
+    // Visible border box (shown on hover via CSS)
+    gearG.appendChild(svgEl('rect', { x: 0, y: 0, width: btnW, height: btnH, rx: 3,
+      fill: 'none', stroke: '#30363d', 'stroke-width': 1, class: 'module-settings-icon-border' }));
+    const gearTxt = svgEl('text', {
+      x: btnW / 2, y: btnH / 2 + 4,
+      'text-anchor': 'middle', fill: '#8b949e', 'font-size': 11,
+      style: 'pointer-events:none;user-select:none;',
+    });
+    gearTxt.textContent = '⚙';
+    gearG.appendChild(gearTxt);
+    g.appendChild(gearG);
   }
 
   const portPositions = {};  // portName -> { x (abs), y (abs), side }
