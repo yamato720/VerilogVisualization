@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Block Design — Verilog Visualizer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ===== Sidebar ===== -->
+<div id="sidebar">
+  <div class="sidebar-header">
+    <h2>🧩 Block Design</h2>
+    <button id="btn-collapse-sidebar" class="sidebar-collapse-btn" onclick="toggleBdSidebar()" title="收起侧边栏">◀</button>
+  </div>
+
+  <!-- Open Chisel Folder -->
+  <div class="sidebar-section">
+    <h3>打开设计</h3>
+    <div class="open-buttons">
+      <button class="btn-primary" onclick="bdOpenFileBrowser()">📁 选择 Chisel 源文件夹...</button>
+    </div>
+    <div id="bd-folder-path" class="status-msg" style="margin-top:6px;word-break:break-all;"></div>
+  </div>
+
+  <!-- Saved Chisel Designs (history) -->
+  <div class="sidebar-section">
+    <h3>历史设计</h3>
+    <div id="bd-history-list" class="design-list" style="max-height:160px;overflow-y:auto;"></div>
+  </div>
+
+  <!-- Scala Files -->
+  <div class="sidebar-section" id="bd-files-section" style="display:none;">
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <h3>SCALA 文件</h3>
+      <button class="btn-secondary" onclick="bdCreateNewFile()" style="padding:2px 10px;font-size:11px;">+ 新建</button>
+    </div>
+    <div id="bd-file-list" class="design-list" style="max-height:200px;overflow-y:auto;"></div>
+  </div>
+
+  <!-- Module Hierarchy (all modules in folder, draggable) -->
+  <div class="sidebar-section" id="bd-modules-section" style="display:none;">
+    <h3>模块层次</h3>
+    <div id="bd-module-tree" style="font-size:13px;max-height:none;overflow-y:auto;"></div>
+  </div>
+</div>
+
+<!-- ===== Main ===== -->
+<div id="main">
+  <!-- Expand sidebar btn -->
+  <button id="btn-expand-sidebar" class="sidebar-expand-btn" onclick="toggleBdSidebar()" title="展开侧边栏" style="display:none;">▶</button>
+
+  <!-- Module Tab Bar -->
+  <div id="tab-bar" style="display:flex;align-items:center;gap:4px;padding-right:8px;">
+    <div id="bd-module-tabs" style="display:flex;flex:1;overflow-x:auto;"></div>
+    <button class="toolbar-btn" onclick="bdCreateNewModule()" title="创建新模块">+</button>
+    <button class="toolbar-btn" onclick="bdFitView()" title="适应窗口">📐</button>
+    <button class="toolbar-btn" onclick="bdResetLayout()" title="重置布局">🔄</button>
+    <button class="toolbar-btn" onclick="bdOpenSettings()" title="设置（添加/修改引脚）">⚙️</button>
+    <button id="bd-save-btn" class="toolbar-btn" onclick="bdSaveToChisel()" title="保存到 Chisel 文件" style="display:none;">💾</button>
+  </div>
+
+  <!-- Canvas -->
+  <div id="bd-canvas-container">
+    <div id="bd-welcome" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">
+      <div class="welcome-content">
+        <h1>🧩 Block Design</h1>
+        <p>选择一个 Chisel 源文件夹，然后勾选一个 .scala 文件开始设计</p>
+        <button class="btn-primary btn-large" onclick="bdOpenFileBrowser()" style="margin-top:16px;">📁 选择 Chisel 源文件夹...</button>
+      </div>
+    </div>
+    <svg id="bd-svg" xmlns="http://www.w3.org/2000/svg" style="display:none;width:100%;height:100%;">
+      <defs>
+        <marker id="bd-arrow-out" viewBox="0 0 10 6" refX="10" refY="3"
+                markerWidth="10" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,3 L0,6 Z" fill="#4fc3f7"/>
+        </marker>
+      </defs>
+      <g id="bd-svg-root"></g>
+    </svg>
+
+    <!-- Wire Info Bar (inside canvas container so width matches canvas) -->
+    <div id="bd-wire-info" style="display:none;position:absolute;bottom:0;left:0;right:0;background:#161b22;border-top:1px solid #30363d;padding:6px 14px;font-size:12px;color:#8b949e;z-index:10;">
+    <div style="display:flex;align-items:center;">
+      <span id="bd-wire-info-text" style="flex:1;"></span>
+      <button class="btn-secondary" onclick="bdOpenWireCustomize()" style="margin-left:12px;padding:2px 10px;font-size:11px;">⚙️ 设置</button>
+      <button class="btn-secondary" onclick="bdDeselectWire()" style="margin-left:4px;padding:2px 10px;font-size:11px;">✕</button>
+    </div>
+    <div id="bd-wp-panel" style="display:none;">
+      <div id="bd-wp-panel-header" style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 6px;border-top:1px solid #30363d;color:#c9d1d9;font-size:12px;user-select:none;margin-top:4px;">
+        <span id="bd-wp-panel-arrow">▶</span>
+        <span id="bd-wp-panel-title">拐点</span>
+      </div>
+      <div id="bd-wp-panel-body" style="display:none;padding:4px 8px 4px 8px;max-height:120px;overflow-y:auto;"></div>
+    </div>
+    </div> <!-- end bd-wire-info -->
+  </div> <!-- end bd-canvas-container -->
+
+  <!-- Toast container -->
+  <div id="toast-container" style="position:fixed;bottom:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none;"></div>
+</div>
+
+<!-- ===== File Browser Modal ===== -->
+<div id="bd-fb-overlay" class="modal-overlay" style="display:none;" onclick="if(event.target===this)bdCloseFileBrowser()">
+  <div class="modal fb-modal">
+    <div class="modal-header">
+      <h3>📁 选择 Chisel 源文件夹</h3>
+      <button class="modal-close" onclick="bdCloseFileBrowser()">✕</button>
+    </div>
+    <div class="fb-navbar">
+      <button class="fb-nav-btn" onclick="bdFbGoUp()" title="上级目录">⬆</button>
+      <button class="fb-nav-btn" onclick="bdFbGoHome()" title="主目录">🏠</button>
+      <div id="bd-fb-breadcrumb" class="fb-breadcrumb"></div>
+    </div>
+    <div class="fb-path-row">
+      <input type="text" id="bd-fb-path-input" placeholder="输入路径并回车..." onkeydown="if(event.key==='Enter')bdFbNavigateTo(this.value)" />
+      <button onclick="bdFbNavigateTo(document.getElementById('bd-fb-path-input').value)">前往</button>
+    </div>
+    <div id="bd-fb-file-list" class="fb-file-list"></div>
+    <div class="fb-footer">
+      <div class="fb-selected-row">
+        <span class="fb-label">已选择:</span>
+        <span id="bd-fb-selected-path" class="fb-selected-val">（无）</span>
+      </div>
+      <div class="fb-actions">
+        <button class="btn-primary" id="bd-fb-btn-confirm" onclick="bdFbConfirm()" disabled>选择此文件夹</button>
+        <button class="btn-secondary" onclick="bdCloseFileBrowser()">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Settings Modal (Pin Editor) ===== -->
+<div id="bd-settings-overlay" class="modal-overlay" style="display:none;" onclick="if(event.target===this)bdCloseSettings()">
+  <div class="modal settings-modal" style="width:560px;">
+    <div class="modal-header">
+      <h3>⚙️ 模块引脚设置</h3>
+      <button class="modal-close" onclick="bdCloseSettings()">✕</button>
+    </div>
+    <div id="bd-settings-content" class="settings-content" style="max-height:500px;overflow-y:auto;"></div>
+    <div class="fb-footer">
+      <div class="fb-actions">
+        <button class="btn-primary" onclick="bdApplySettings()">应用</button>
+        <button class="btn-secondary" onclick="bdCloseSettings()">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Customization Modal (Verilog-style: color/rename/comment) ===== -->
+<div id="bd-custom-overlay" class="modal-overlay" style="display:none;" onclick="if(event.target===this && !window._bdCustomResizing)bdCloseCustomize()">
+  <div class="modal settings-modal" id="bd-custom-modal">
+    <div class="modal-header">
+      <h3>⚙️ 自定义设置</h3>
+      <button class="modal-close" onclick="bdCloseCustomize()">✕</button>
+    </div>
+    <div id="bd-custom-content" class="settings-content"></div>
+    <div class="fb-footer">
+      <div class="fb-actions">
+        <button class="btn-primary" onclick="bdApplyCustomize()">应用</button>
+        <button class="btn-secondary" onclick="bdCloseCustomize()">取消</button>
+      </div>
+    </div>
+    <div id="bd-custom-resize" style="position:absolute;bottom:0;right:0;width:16px;height:16px;cursor:nwse-resize;opacity:0.4;background:linear-gradient(135deg,transparent 50%,#58a6ff 50%);border-bottom-right-radius:12px;z-index:1;"></div>
+  </div>
+</div>
+
+<!-- ===== New Module Dialog ===== -->
+<div id="bd-newmod-overlay" class="modal-overlay" style="display:none;" onclick="if(event.target===this)bdCloseNewModuleDialog()">
+  <div class="modal" style="width:400px;">
+    <div class="modal-header">
+      <h3>➕ 创建新模块</h3>
+      <button class="modal-close" onclick="bdCloseNewModuleDialog()">✕</button>
+    </div>
+    <div style="padding:16px;">
+      <div class="settings-row">
+        <label>模块名</label>
+        <input type="text" id="bd-newmod-name" placeholder="MyModule" onkeydown="if(event.key==='Enter')bdConfirmNewModule()" />
+      </div>
+    </div>
+    <div class="fb-footer">
+      <div class="fb-actions">
+        <button class="btn-primary" onclick="bdConfirmNewModule()">创建</button>
+        <button class="btn-secondary" onclick="bdCloseNewModuleDialog()">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== New File Dialog ===== -->
+<div id="bd-newfile-overlay" class="modal-overlay" style="display:none;" onclick="if(event.target===this)bdCloseNewFileDialog()">
+  <div class="modal" style="width:400px;">
+    <div class="modal-header">
+      <h3>📄 新建 Scala 文件</h3>
+      <button class="modal-close" onclick="bdCloseNewFileDialog()">✕</button>
+    </div>
+    <div style="padding:16px;">
+      <div class="settings-row">
+        <label>文件名</label>
+        <input type="text" id="bd-newfile-name" placeholder="MyModule.scala" onkeydown="if(event.key==='Enter')bdConfirmNewFile()" />
+      </div>
+    </div>
+    <div class="fb-footer">
+      <div class="fb-actions">
+        <button class="btn-primary" onclick="bdConfirmNewFile()">创建</button>
+        <button class="btn-secondary" onclick="bdCloseNewFileDialog()">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/block_renderer.js"></script>
+<script src="/static/block_design.js"></script>
+<script>
+function toggleBdSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  const expand  = document.getElementById('btn-expand-sidebar');
+  const collapse = document.getElementById('btn-collapse-sidebar');
+  if (sidebar.style.display === 'none') {
+    sidebar.style.display = '';
+    expand.style.display = 'none';
+    collapse.style.display = '';
+  } else {
+    sidebar.style.display = 'none';
+    expand.style.display = '';
+    collapse.style.display = 'none';
+  }
+}
+document.addEventListener('DOMContentLoaded', () => {
+  bdInitCanvas();
+  bdInitCustomizeResize();
+  bdLoadHistoryList();
+  // Auto-restore last folder across page refreshes
+  try {
+    const lastFolder = localStorage.getItem(BD_STORAGE_PREFIX + 'last_folder');
+    if (lastFolder) bdSetFolder(lastFolder);
+  } catch(e) {}
+});
+</script>
+</body>
+</html>

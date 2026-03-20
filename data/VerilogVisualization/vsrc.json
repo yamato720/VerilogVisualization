@@ -1,0 +1,340 @@
+{
+  "top_modules": [
+    "ALU",
+    "LFSR",
+    "cpu",
+    "encoder_8_3",
+    "light",
+    "top"
+  ],
+  "modules": {
+    "ALU": {
+      "name": "ALU",
+      "ports": [
+        {
+          "name": "rst",
+          "direction": "input",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "a",
+          "direction": "input",
+          "width": 4,
+          "msb": 3,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "b",
+          "direction": "input",
+          "width": 4,
+          "msb": 3,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "alu_control",
+          "direction": "input",
+          "width": 3,
+          "msb": 2,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "alu_result",
+          "direction": "output",
+          "width": 4,
+          "msb": 3,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "zero",
+          "direction": "output",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "cout",
+          "direction": "output",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "overflow",
+          "direction": "output",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        }
+      ],
+      "instances": [],
+      "wires": [
+        {
+          "name": "result_temp",
+          "width": 5,
+          "msb": 4,
+          "lsb": 0
+        }
+      ],
+      "parameters": {},
+      "source_file": "ALU.v"
+    },
+    "LFSR": {
+      "name": "LFSR",
+      "ports": [
+        {
+          "name": "clk",
+          "direction": "input",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "rst",
+          "direction": "input",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "lfsr_out",
+          "direction": "output",
+          "width": 8,
+          "msb": 7,
+          "lsb": 0,
+          "is_active_low": false
+        }
+      ],
+      "instances": [],
+      "wires": [],
+      "parameters": {},
+      "source_file": "LFSR.v"
+    },
+    "encoder_8_3": {
+      "name": "encoder_8_3",
+      "ports": [
+        {
+          "name": "din",
+          "direction": "input",
+          "width": 8,
+          "msb": 7,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "en",
+          "direction": "input",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "dout",
+          "direction": "output",
+          "width": 3,
+          "msb": 2,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "valid",
+          "direction": "output",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "seg_out",
+          "direction": "output",
+          "width": 8,
+          "msb": 7,
+          "lsb": 0,
+          "is_active_low": false
+        }
+      ],
+      "instances": [
+        {
+          "module_type": "seg",
+          "instance_name": "u_seg",
+          "connections": {
+            "b": "dout",
+            "h": "seg_out"
+          },
+          "param_values": {}
+        }
+      ],
+      "wires": [
+        {
+          "name": "seg_in",
+          "width": 4,
+          "msb": 3,
+          "lsb": 0
+        }
+      ],
+      "parameters": {},
+      "source_file": "encoder_8_3.v"
+    },
+    "seg": {
+      "name": "seg",
+      "ports": [
+        {
+          "name": "b",
+          "direction": "input",
+          "width": 3,
+          "msb": 2,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "h",
+          "direction": "output",
+          "width": 8,
+          "msb": 7,
+          "lsb": 0,
+          "is_active_low": false
+        }
+      ],
+      "instances": [],
+      "wires": [],
+      "parameters": {},
+      "source_file": "encoder_8_3.v"
+    },
+    "light": {
+      "name": "light",
+      "ports": [
+        {
+          "name": "clk",
+          "direction": "input",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "rst",
+          "direction": "input",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "led",
+          "direction": "output",
+          "width": 16,
+          "msb": 15,
+          "lsb": 0,
+          "is_active_low": false
+        }
+      ],
+      "instances": [],
+      "wires": [
+        {
+          "name": "count",
+          "width": 32,
+          "msb": 31,
+          "lsb": 0
+        }
+      ],
+      "parameters": {},
+      "source_file": "example.v"
+    },
+    "top": {
+      "name": "top",
+      "ports": [
+        {
+          "name": "a",
+          "direction": "input",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "b",
+          "direction": "input",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "f",
+          "direction": "output",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        }
+      ],
+      "instances": [],
+      "wires": [],
+      "parameters": {},
+      "source_file": "xor_switch.v"
+    },
+    "cpu": {
+      "name": "cpu",
+      "ports": [
+        {
+          "name": "clk",
+          "direction": "input",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "rst",
+          "direction": "input",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        }
+      ],
+      "instances": [],
+      "wires": [
+        {
+          "name": "pc",
+          "width": 32,
+          "msb": 31,
+          "lsb": 0
+        },
+        {
+          "name": "inst",
+          "width": 32,
+          "msb": 31,
+          "lsb": 0
+        },
+        {
+          "name": "opcode",
+          "width": 7,
+          "msb": 6,
+          "lsb": 0
+        },
+        {
+          "name": "state",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0
+        }
+      ],
+      "parameters": {},
+      "source_file": "cpu.v"
+    }
+  },
+  "source_path": "/home/pyx/Workspace/ysyx-workbench/npc/vsrc"
+}

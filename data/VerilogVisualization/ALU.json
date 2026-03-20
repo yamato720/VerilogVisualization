@@ -1,0 +1,92 @@
+{
+  "top_modules": [
+    "ALU"
+  ],
+  "modules": {
+    "ALU": {
+      "name": "ALU",
+      "ports": [
+        {
+          "name": "rst",
+          "direction": "input",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "a",
+          "direction": "input",
+          "width": 4,
+          "msb": 3,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "b",
+          "direction": "input",
+          "width": 4,
+          "msb": 3,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "alu_control",
+          "direction": "input",
+          "width": 3,
+          "msb": 2,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "alu_result",
+          "direction": "output",
+          "width": 4,
+          "msb": 3,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "zero",
+          "direction": "output",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "cout",
+          "direction": "output",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        },
+        {
+          "name": "overflow",
+          "direction": "output",
+          "width": 1,
+          "msb": 0,
+          "lsb": 0,
+          "is_active_low": false
+        }
+      ],
+      "instances": [],
+      "wires": [
+        {
+          "name": "result_temp",
+          "width": 5,
+          "msb": 4,
+          "lsb": 0
+        }
+      ],
+      "parameters": {},
+      "source_file": "ALU.v"
+    }
+  },
+  "source_path": "/home/pyx/Workspace/ysyx-workbench/npc/vsrc/ALU.v",
+  "customizations": {
+    "modules": {},
+    "wires": {}
+  }
+}

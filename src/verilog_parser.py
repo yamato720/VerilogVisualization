@@ -481,12 +481,43 @@ def analyze_and_save(source_path: str, data_dir: str) -> Dict:
             save_name = os.path.splitext(os.path.basename(source_path))[0]
 
     os.makedirs(data_dir, exist_ok=True)
-    save_path = os.path.join(data_dir, f"{save_name}.json")
-    with open(save_path, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
 
-    result['saved_as'] = save_name
-    return result
+    # If a JSON with the same name already exists but was built from a different
+    # source path, avoid clobbering it by appending a numeric suffix.
+    candidate = save_name
+    counter = 1
+    while True:
+        candidate_path = os.path.join(data_dir, f"{candidate}.json")
+        if not os.path.exists(candidate_path):
+            break  # free slot
+        try:
+            with open(candidate_path, 'r', encoding='utf-8') as _f:
+                existing = json.load(_f)
+            if existing.get('source_path') == os.path.abspath(source_path):
+                break  # same source — overwrite is fine
+        except Exception:
+            break  # unreadable file, overwrite
+        candidate = f"{save_name}_{counter}"
+        counter += 1
+    save_name = candidate
+    save_path = candidate_path
+
+    # Build an ordered dict so metadata appears at the top of the JSON file,
+    # making source_path / save_path easy to locate without scrolling past
+    # the (potentially huge) modules block.
+    ordered_result = {
+        'source_path': result['source_path'],
+        'save_path':   save_path,
+        'source_files': result['source_files'],
+        'top_modules':  result['top_modules'],
+        'modules':      result['modules'],
+    }
+
+    with open(save_path, 'w', encoding='utf-8') as f:
+        json.dump(ordered_result, f, indent=2, ensure_ascii=False)
+
+    ordered_result['saved_as'] = save_name
+    return ordered_result
 
 
 if __name__ == '__main__':

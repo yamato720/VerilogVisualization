@@ -1,46 +1,46 @@
 # ⚡ VerilogVisualization
 
-An interactive, browser-based Verilog module hierarchy visualizer.  
-Designed for Chisel-generated RTL and hand-written Verilog — parse a single `.v` file or an entire folder, explore the module tree, trace signals, and export diagrams.
+基于浏览器的 Verilog 模块层次可视化工具。  
+适用于 Chisel 生成的 RTL 和手写的 Verilog —— 解析单个 `.v` 文件或整个文件夹，探索模块树、追踪信号，并导出电路图。
 
 ![Screenshot](img/Screenshot_20260306_231753.png)
 
 ---
 
-## ✨ Features
+## ✨ 功能特性
 
-| Feature | Description |
+| 功能 | 说明 |
 |---|---|
-| 📂 **File / Folder Analysis** | Parse a single `.v` file or a whole folder; automatically identifies the top-level module |
-| 🔍 **Auto Sibling Search** | When parsing a single file, missing module definitions are searched in sibling `.v` files automatically |
-| 🌲 **Module Hierarchy Tree** | Collapsible sidebar tree; single-click **navigates & highlights** the instance on the canvas |
-| 🔎 **Module Search** | Search box in the module tree to quickly locate any module by name |
-| 📐 **Interactive Canvas** | Pan (drag), zoom (scroll), fit-to-view; move modules by dragging the header |
-| 🔌 **Signal Wires** | Click a wire to **select & highlight** it; double-click to add routing waypoints; right-click waypoints to delete |
-| 🚦 **Port Stubs & Arrows** | Input/output arrows on every port; active-low ports marked with a circle |
-| 📦 **Port Collapsing** | Common-prefix port groups collapsed by default to reduce clutter; expandable on click |
-| 🕐 **Clock/Reset Toggle** | Hide/show clock and reset pins + their wires with one button |
-| 💾 **Layout Persistence** | Module positions, wire waypoints, and pan/zoom saved to `localStorage` per design |
-| 📤 **Export** | Export the dashed bounding-box content as **SVG**, **PNG** (2× HiDPI), or **HTML** |
-| 🗂️ **Multi-tab** | Open multiple designs simultaneously in separate tabs |
-| ↔️ **Collapsible Sidebar** | Sidebar can be collapsed to maximise canvas space; fullscreen mode available |
+| 📂 **文件 / 文件夹解析** | 解析单个 `.v` 文件或整个文件夹，自动识别顶层模块 |
+| 🔍 **自动兄弟文件搜索** | 解析单个文件时，所缺少的模块定义会自动在同目录下的 `.v` 文件中查找 |
+| 🌲 **模块层次树** | 可折叠侧边栏树；单击任意模块即可在画布上**定位并高亮**对应实例 |
+| 🔎 **模块搜索** | 模块树上方的搜索框，可按名称快速定位模块 |
+| 📐 **交互式画布** | 拖动平移、滚轮缩放、一键适应视图；拖动标题栏移动模块 |
+| 🔌 **信号连线** | 单击连线可**选中并高亮**；双击添加折线中转点；右键中转点删除 |
+| 🚦 **端口箭头标记** | 每个端口均有输入 / 输出箭头；低电平有效端口以圆圈标注 |
+| 📦 **端口折叠** | 同名前缀的端口组默认折叠以减少杂乱，可点击展开 |
+| 🕐 **时钟/复位切换** | 一键隐藏 / 显示所有时钟和复位信号及其连线 |
+| 💾 **布局持久化** | 模块位置、连线中转点、平移缩放状态按设计名保存至 `localStorage` 及服务端 JSON |
+| 📤 **导出** | 将虚线框内容导出为 **SVG**、**PNG**（2× HiDPI）或 **HTML** |
+| 🗂️ **多标签页** | 在独立标签页中同时打开多个设计 |
+| ↔️ **侧边栏折叠** | 侧边栏可折叠以最大化画布空间；支持全屏模式 |
 
 ---
 
-## 📸 Screenshots
+## 📸 截图
 
-### Module hierarchy with wires and port stubs
+### 模块层次与连线、端口
 ![CPU design](img/CPU.svg)
 
 ---
 
-## 🚀 Quick Start
+## 🚀 快速开始
 
-### Requirements
+### 环境要求
 - Python 3.8+
-- A modern browser (Chrome / Firefox / Edge)
+- 现代浏览器（Chrome / Firefox / Edge）
 
-### One-command setup & launch
+### 一键安装并启动
 
 ```bash
 git clone https://github.com/yamato720/VerilogVisualization.git
@@ -48,64 +48,122 @@ cd VerilogVisualization
 bash setup.sh
 ```
 
-The script will:
-1. Detect your Python interpreter (3.8+)
-2. Create a `.venv` virtual environment
-3. Install `flask` from `requirements.txt`
-4. Start the server at **http://127.0.0.1:5000** and open your browser
+脚本将自动完成以下操作：
+1. 检测 Python 解释器（3.8+）
+2. 创建 `.venv` 虚拟环境
+3. 从 `requirements.txt` 安装 `flask`
+4. 在 **http://127.0.0.1:5000** 启动服务器并打开浏览器
+
+### 远程部署 / 自定义端口
+
+两个脚本均支持通过参数指定监听地址和端口：
+
+```bash
+# 语法: bash setup.sh [HOST] [PORT]
+bash setup.sh 0.0.0.0 8080      # 监听所有网卡，端口 8080
+bash start.sh 0.0.0.0 8080      # 已安装依赖时使用 start.sh 快速重启
+```
+
+> **注意**：绑定 `0.0.0.0` 会允许局域网内所有主机访问，请确保在可信网络环境中使用。  
+> 脚本在杀死占用端口的进程前会**征求用户确认**，不会静默强杀。
 
 ---
 
-## 🗂️ Project Structure
+## 🗂️ 项目结构
 
 ```
 VerilogVisualization/
-├── setup.sh              ← One-click setup + launch
-├── start.sh              ← Re-launch (assumes .venv already exists)
-├── requirements.txt      ← Python deps (flask)
-├── data/                 ← Auto-generated design JSON cache
-├── img/                  ← Screenshots / demo images
+├── setup.sh              ← 一键安装 + 启动（支持 HOST/PORT 参数）
+├── start.sh              ← 快速重启（假设 .venv 已存在，支持 HOST/PORT 参数）
+├── requirements.txt      ← Python 依赖（flask）
+├── data/                 ← 自动生成的设计 JSON 缓存
+├── img/                  ← 截图 / 演示图片
 └── src/
-    ├── app.py            ← Flask backend (API endpoints, export)
-    ├── verilog_parser.py ← Verilog parser (modules, ports, instances, assigns)
+    ├── app.py            ← Flask 后端（API、导出；读取 VV_HOST / VV_PORT 环境变量）
+    ├── verilog_parser.py ← Verilog 解析器（模块、端口、实例、assign）
+    ├── chisel_parser.py  ← Chisel/Scala 解析器
     ├── templates/
-    │   └── index.html    ← Single-page app shell
+    │   ├── index.html    ← 单页应用主界面
+    │   └── block_design.html ← Chisel Block Design 界面
     └── static/
-        ├── renderer.js   ← SVG rendering engine (layout, wires, port stubs)
-        ├── app.js        ← Frontend logic (pan/zoom, drag, export, sidebar)
-        └── style.css     ← Dark-theme styles
+        ├── renderer.js   ← SVG 渲染引擎（布局、连线、端口）
+        ├── app.js        ← 前端逻辑（平移缩放、拖拽、导出、侧边栏）
+        └── style.css     ← 深色主题样式
 ```
 
 ---
 
-## 📖 Usage
+## 📖 使用方法
 
-1. **Open a design** — click **浏览文件** (Browse) to navigate to a `.v` file or a folder, then confirm to parse.
-2. **Explore the tree** — use the left sidebar module tree; single-click any module to jump to it on the canvas; double-click expandable modules to reveal/hide their internals.
-3. **Search** — type in the search box above the module tree to filter by name.
-4. **Navigate** — scroll to zoom, drag the background to pan, or click **适应窗口** (Fit View).
-5. **Wires** — click a wire to highlight it and show source/destination in the info bar; double-click to add routing waypoints.
-6. **Clock/Reset** — toggle the **🕐 显示时钟/复位** button to hide/show all clock and reset pins and their wires.
-7. **Export** — click **SVG**, **PNG**, or **HTML** to download the current diagram (exports only the dashed bounding-box region, regardless of current pan/zoom).
-8. **Fullscreen / Collapse** — use **⛶** for fullscreen, **◀/▶** to collapse/expand the sidebar.
+1. **打开设计** — 点击**浏览文件**选择 `.v` 文件或文件夹，确认后开始解析。
+2. **浏览模块树** — 左侧侧边栏展示模块层次；单击任意模块跳转至画布对应位置；双击可展开 / 折叠子模块。
+3. **搜索模块** — 在模块树上方搜索框输入名称进行过滤。
+4. **画布导航** — 滚轮缩放，拖动背景平移，或点击**适应窗口**一键还原视图。
+5. **连线操作** — 单击连线高亮显示来源和目标；双击添加折线中转点；右键中转点删除。
+6. **时钟/复位** — 点击 **🕐 显示时钟/复位** 按钮切换时钟和复位信号的显示。
+7. **导出** — 点击 **SVG**、**PNG** 或 **HTML** 按钮导出当前虚线框内的电路图。
+8. **全屏 / 折叠侧边栏** — 用 **⛶** 进入全屏，用 **◀/▶** 折叠 / 展开侧边栏。
 
 ---
 
-## ⚙️ API Endpoints (backend)
+## ⚙️ API 接口
 
-| Method | Endpoint | Description |
+| 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/` | Main UI |
-| POST | `/api/browse` | Filesystem browser |
-| POST | `/api/analyze` | Parse Verilog file or folder |
-| GET | `/api/designs` | List saved designs |
-| GET | `/api/design/<name>` | Get design data |
-| DELETE | `/api/delete/<name>` | Delete a design |
-| POST | `/api/export_svg` | Download SVG |
-| POST | `/api/export_html` | Download HTML |
+| GET | `/` | 主界面 |
+| POST | `/api/browse` | 文件系统浏览器 |
+| POST | `/api/analyze` | 解析 Verilog 文件或文件夹 |
+| GET | `/api/designs` | 列出已保存的设计 |
+| GET | `/api/design/<name>` | 获取设计数据 |
+| DELETE | `/api/delete/<name>` | 删除设计 |
+| POST | `/api/save_state` | 保存布局 / 中转点 / 视图 / 自定义样式到服务端 JSON |
+| POST | `/api/export_svg` | 下载 SVG |
+| POST | `/api/export_html` | 下载 HTML |
+| GET | `/block-design` | Chisel Block Design 界面 |
+| POST | `/api/chisel/browse` | 浏览 Chisel 源文件夹 |
+| POST | `/api/chisel/list_files` | 列出文件夹内 `.scala` 文件 |
+| POST | `/api/chisel/parse_file` | 解析指定 Chisel 文件 |
+| POST | `/api/chisel/parse_folder` | 解析整个 Chisel 文件夹 |
+| POST | `/api/chisel/save_canvas` | 保存 Block Design 画布状态 |
+| POST | `/api/chisel/read_file` | 读取 Chisel 源文件内容 |
 
 ---
 
-## 📝 License
+## 🚧 计划功能：Chisel Block Design
+
+> 以下为下一阶段的开发计划，尚未完全实现。
+
+在现有画布工具栏上方新增 **Block Design** 按钮，点击后弹出独立的设计窗口，UI 风格与当前保持一致，但针对 Chisel 工作流进行了深度定制：
+
+1. **选择 Chisel 源文件夹**  
+   打开设计时选择一个 Chisel 源文件夹，工具对其中的 Scala 代码进行静态分析（而非 Verilog）。
+
+2. **文件清单 + 模块切换**  
+   左侧面板换为该文件夹内的 `.scala` 文件清单，勾选一个文件后，画布显示该文件包含的所有模块；  
+   画布顶部排列各模块的切换标签，点击可快速在模块间跳转；  
+   提供**新建模块**按钮，在当前文件中快速创建新 Chisel 模块。
+
+3. **新建 Chisel 文件**  
+   文件清单旁有**新建**按钮，创建新的 `.scala` 文件；  
+   文件创建时自动插入同文件夹中其他文件所属的 `package` 声明，以及 `import.scala` 中的公共导入内容。
+
+4. **可拖拽模块层次树**  
+   下方层次模块树展示 Chisel 源文件夹内所有模块名称，  
+   支持将任意模块**拖拽到画布**中实例化，自动显示其输入 / 输出引脚。
+
+5. **引脚设置（替换全屏按钮）**  
+   将画布原有的全屏按钮替换为**设置**按钮，打开引脚设置面板：  
+   可对当前模块添加、修改输入 / 输出引脚，并自定义每个引脚的位宽。
+
+6. **引脚连线与中转点**  
+   输入 / 输出引脚显示在模块框边缘，可拖动以调整位置；  
+   支持将任意两个引脚连线；  
+   允许将线连接到画布空白区域，自动生成**中转点**；  
+   中转点可继续向外连线，形成折线路由。
+
+---
+
+## 📝 许可证
 
 MIT
+

@@ -43,6 +43,10 @@
         </label>
       </div>
     </div>
+    <!-- Block Design Entry -->
+    <div style="margin-top:12px;">
+      <button class="block-design-btn" style="width:100%;" onclick="window.open('/block-design','_blank')">🧩 Block Design...</button>
+    </div>
   </div>
 
   <!-- Saved Designs -->
@@ -114,13 +118,20 @@
   <!-- Info Panel (bottom) -->
   <div id="info-panel" style="display:none;">
     <div id="info-content"></div>
+    <div id="wp-panel" style="display:none;">
+      <div id="wp-panel-header" style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 6px;border-top:1px solid #30363d;color:#c9d1d9;font-size:12px;user-select:none;">
+        <span id="wp-panel-arrow">▶</span>
+        <span id="wp-panel-title">拐点</span>
+      </div>
+      <div id="wp-panel-body" style="display:none;padding:4px 8px 4px 8px;max-height:120px;overflow-y:auto;"></div>
+    </div>
     <button id="info-settings" onclick="openSettingsPanel()" title="自定义设置" style="display:none;">⚙️</button>
     <button id="info-close" onclick="closeInfoPanel()">✕</button>
   </div>
 </div>
 
 <!-- ============ Settings Modal ============ -->
-<div id="settings-overlay" class="modal-overlay" style="display:none;" onclick="if(event.target===this)closeSettingsModal()">
+<div id="settings-overlay" class="modal-overlay" style="display:none;" onclick="if(event.target===this && !window._settingsResizing)closeSettingsModal()">
   <div class="modal settings-modal">
     <div class="modal-header">
       <h3>⚙️ 自定义设置</h3>
@@ -133,6 +144,7 @@
         <button class="btn-secondary" onclick="closeSettingsModal()">取消</button>
       </div>
     </div>
+    <div id="settings-modal-resize" title="拖拽缩放"></div>
   </div>
 </div>
 
@@ -199,6 +211,9 @@
 
 <!-- Hidden file input for .md comment import -->
 <input type="file" id="comment-file-input" accept=".md,.txt" style="display:none;" onchange="handleCommentFileImport(event)">
+
+<!-- [Block Design lives at /block-design] -->
+
 
 <script src="/static/renderer.js"></script>
 <script src="/static/app.js"></script>
