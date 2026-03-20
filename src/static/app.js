@@ -13,6 +13,7 @@ const STORAGE_VIEW_KEY_PREFIX = 'vviz_view_';
 function saveLayout(designName, layoutData) {
   try { localStorage.setItem(STORAGE_KEY_PREFIX + designName, JSON.stringify(layoutData)); }
   catch (e) { console.warn('Failed to save layout', e); }
+  scheduleSyncToServer(designName);
 }
 function loadLayout(designName) {
   try { const d = localStorage.getItem(STORAGE_KEY_PREFIX + designName); return d ? JSON.parse(d) : {}; }
@@ -21,6 +22,7 @@ function loadLayout(designName) {
 function saveWireWaypoints(designName, data) {
   try { localStorage.setItem(STORAGE_WIRE_KEY_PREFIX + designName, JSON.stringify(data)); }
   catch (e) {}
+  scheduleSyncToServer(designName);
 }
 function loadWireWaypoints(designName) {
   try { const d = localStorage.getItem(STORAGE_WIRE_KEY_PREFIX + designName); return d ? JSON.parse(d) : {}; }
@@ -37,6 +39,7 @@ function loadCollapsedState() {
 function saveViewState(designName, view) {
   try { localStorage.setItem(STORAGE_VIEW_KEY_PREFIX + designName, JSON.stringify(view)); }
   catch (e) {}
+  scheduleSyncToServer(designName);
 }
 function loadViewState(designName) {
   try { const d = localStorage.getItem(STORAGE_VIEW_KEY_PREFIX + designName); return d ? JSON.parse(d) : null; }
@@ -76,9 +79,49 @@ const STORAGE_COMMENT_POPUP_SIZE = 'vviz_comment_popup_size';
 function saveCommentPopupSize(w, h) {
   try { localStorage.setItem(STORAGE_COMMENT_POPUP_SIZE, JSON.stringify({ w, h })); } catch(e) {}
 }
+
+const STORAGE_SETTINGS_MODAL_SIZE = 'vviz_settings_modal_size';
+function saveSettingsModalSize(w, h) {
+  try { localStorage.setItem(STORAGE_SETTINGS_MODAL_SIZE, JSON.stringify({ w, h })); } catch(e) {}
+}
+function loadSettingsModalSize() {
+  try { const d = localStorage.getItem(STORAGE_SETTINGS_MODAL_SIZE); return d ? JSON.parse(d) : { w: 500, h: 420 }; }
+  catch(e) { return { w: 500, h: 420 }; }
+}
 function loadCommentPopupSize() {
   try { const d = localStorage.getItem(STORAGE_COMMENT_POPUP_SIZE); return d ? JSON.parse(d) : { w: 340, h: 260 }; }
   catch(e) { return { w: 340, h: 260 }; }
+}
+
+// ─── Server state sync (debounced) ──────────────────────────────────────
+// Persists layout/waypoints/view/customizations into the server-side JSON
+// so the file is self-contained and portable (copy/share).
+
+const _syncTimers = {};
+function scheduleSyncToServer(designName) {
+  if (!designName) return;
+  clearTimeout(_syncTimers[designName]);
+  _syncTimers[designName] = setTimeout(() => syncStateToServer(designName), 1500);
+}
+
+function syncStateToServer(designName) {
+  if (!designName) return;
+  // Use current in-memory pan/zoom if this is the active tab, otherwise fall back to localStorage
+  const viewState = (state.activeTab === designName && state.pan)
+    ? { pan: { ...state.pan }, zoom: state.zoom }
+    : (loadViewState(designName) || undefined);
+  const payload = {
+    name: designName,
+    layout: state.layoutOverrides?.[designName] || {},
+    wire_waypoints: state.wireWaypoints?.[designName] || {},
+    customizations: state.customizations?.[designName] || { modules: {}, wires: {} }
+  };
+  if (viewState) payload.view_state = viewState;
+  fetch('/api/save_state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  }).catch(() => {});
 }
 
 // ─── State ──────────────────────────────────────────────────────────────
@@ -107,6 +150,7 @@ const state = {
   hideClockReset: loadHideClockReset(),
   // Wire selection
   selectedWireKey: null,
+  selectedWireSignal: null,   // signal name for the currently selected wire
   // Customizations per design: { modules: {}, wires: {} }
   customizations: {},
   // Settings modal context
@@ -518,9 +562,14 @@ async function loadDesignList() {
         <span class="name">${d.name}</span>
         <span style="color:#484f58;font-size:11px;">${d.module_count}m</span>
         <span class="actions">
+          <button title="重命名" data-action="rename">✏️</button>
           <button title="删除" data-action="delete">🗑</button>
         </span>`;
       item.querySelector('.name').addEventListener('click', () => openDesign(d.name));
+      item.querySelector('[data-action="rename"]').addEventListener('click', e => {
+        e.stopPropagation();
+        renameDesign(d.name);
+      });
       item.querySelector('[data-action="delete"]').addEventListener('click', e => {
         e.stopPropagation();
         deleteDesign(d.name);
@@ -550,16 +599,81 @@ async function openDesign(name) {
       state.expandedModules[name].add(data.top_modules[0]);
     }
 
-    // Load persisted layout overrides and wire waypoints from localStorage
-    state.layoutOverrides[name] = loadLayout(name);
-    state.wireWaypoints[name] = loadWireWaypoints(name);
-    state.customizations[name] = loadCustomizations(name);
+    // Load layout: server JSON is the source of truth (always synced on open/change).
+    // Fall back to localStorage only for old files that pre-date the sync feature.
+    const serverLayout = data.layout || {};
+    const localLayout = loadLayout(name);
+    const hasServerLayout = Object.keys(serverLayout).length > 0;
+    const hasLocalLayout = Object.keys(localLayout).length > 0;
+    if (hasServerLayout) {
+      // Server JSON wins — merge any localStorage-only entries that aren't in the server JSON
+      // (edge case: user moved a module and sync hadn't fired yet before refresh)
+      state.layoutOverrides[name] = hasLocalLayout
+        ? { ...localLayout, ...serverLayout }  // server overrides local for known keys
+        : serverLayout;
+      saveLayout(name, state.layoutOverrides[name]);
+    } else if (hasLocalLayout) {
+      // Old file with no layout in JSON — use localStorage (will be synced to JSON shortly)
+      state.layoutOverrides[name] = localLayout;
+    } else {
+      state.layoutOverrides[name] = {};
+    }
 
-    // Load persisted view state (pan/zoom)
-    const savedView = loadViewState(name);
+    const serverWaypoints = data.wire_waypoints || {};
+    const localWaypoints = loadWireWaypoints(name);
+    const hasServerWp = Object.keys(serverWaypoints).length > 0;
+    const hasLocalWp = Object.keys(localWaypoints).length > 0;
+    if (hasServerWp) {
+      state.wireWaypoints[name] = hasLocalWp
+        ? { ...localWaypoints, ...serverWaypoints }
+        : serverWaypoints;
+      saveWireWaypoints(name, state.wireWaypoints[name]);
+    } else if (hasLocalWp) {
+      state.wireWaypoints[name] = localWaypoints;
+    } else {
+      state.wireWaypoints[name] = {};
+    }
+    // Load customizations: server JSON wins (synced on every change), fall back to localStorage for old files
+    const serverCustom = data.customizations || { modules: {}, wires: {} };
+    const localCustom = loadCustomizations(name);
+    const hasServer = Object.keys(serverCustom.modules || {}).length > 0 || Object.keys(serverCustom.wires || {}).length > 0;
+    const hasLocal = Object.keys(localCustom.modules || {}).length > 0 || Object.keys(localCustom.wires || {}).length > 0;
+    if (hasServer) {
+      state.customizations[name] = hasLocal ? {
+        modules: { ...localCustom.modules, ...serverCustom.modules },
+        wires: { ...localCustom.wires, ...serverCustom.wires }
+      } : serverCustom;
+      saveCustomizations(name, state.customizations[name]);
+    } else if (hasLocal) {
+      state.customizations[name] = localCustom;
+    } else {
+      state.customizations[name] = { modules: {}, wires: {} };
+    }
+
+    // Pre-populate layout overrides for any module not yet positioned, so that
+    // dragging one module never causes other unpositioned modules to jump around.
+    const topModName = data.top_modules?.[0] || Object.keys(data.modules)[0];
+    if (topModName && typeof computeInitialLayout === 'function') {
+      const initial = computeInitialLayout(
+        topModName, data.modules, state.collapsedState,
+        state.layoutOverrides[name], state.hideClockReset
+      );
+      let added = false;
+      for (const [key, pos] of Object.entries(initial)) {
+        if (!state.layoutOverrides[name][key]) {
+          state.layoutOverrides[name][key] = pos;
+          added = true;
+        }
+      }
+      if (added) saveLayout(name, state.layoutOverrides[name]);
+    }
+
+    // Load persisted view state (pan/zoom), fall back to server JSON
+    const savedView = loadViewState(name) || data.view_state || null;
     if (savedView) {
       state.pan = savedView.pan;
       state.zoom = savedView.zoom;
+      if (!loadViewState(name)) saveViewState(name, savedView);
     } else {
       state.pan = { x: 0, y: 0 };
       state.zoom = 1;
@@ -582,9 +696,76 @@ async function openDesign(name) {
     renderCanvas();
     loadDesignList();  // update highlight
 
+    // Always sync current state to server JSON so the file stays portable.
+    // This ensures localStorage positions/waypoints/customizations are written
+    // into the JSON even if the user hasn't made any changes since the last sync.
+    syncStateToServer(name);
+
     showToast(`已加载: ${name}`, 'success');
   } catch (err) {
     showToast('加载失败: ' + err.message, 'error');
+  }
+}
+
+async function renameDesign(oldName) {
+  if (!oldName) return;
+  const newName = prompt(`将 "${oldName}" 重命名为：`, oldName);
+  if (!newName || newName.trim() === oldName) return;
+  const trimmed = newName.trim();
+  try {
+    const res = await fetch('/api/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_name: oldName, new_name: trimmed }),
+    });
+    const data = await res.json();
+    if (data.error) { showToast('重命名失败: ' + data.error, 'error'); return; }
+    // ── Migrate all localStorage keys from oldName → trimmed ──
+    const lsKeys = [
+      [STORAGE_KEY_PREFIX,        loadLayout,           saveLayout          ],
+      [STORAGE_WIRE_KEY_PREFIX,   loadWireWaypoints,    saveWireWaypoints   ],
+      [STORAGE_VIEW_KEY_PREFIX,   loadViewState,        saveViewState       ],
+      [STORAGE_CUSTOM_PREFIX,     loadCustomizations,   saveCustomizations  ],
+    ];
+    lsKeys.forEach(([, loader, saver]) => {
+      const val = loader(oldName);
+      if (val && Object.keys(val).length > 0) saver(trimmed, val);
+      try { localStorage.removeItem(STORAGE_KEY_PREFIX.replace(/layout/, lsKeys[0][0]) + oldName); } catch(e) {}
+    });
+    // Remove old keys explicitly
+    [STORAGE_KEY_PREFIX, STORAGE_WIRE_KEY_PREFIX, STORAGE_VIEW_KEY_PREFIX, STORAGE_CUSTOM_PREFIX].forEach(pfx => {
+      try { localStorage.removeItem(pfx + oldName); } catch(e) {}
+    });
+    // Update in-memory state
+    if (state.designs[oldName]) {
+      state.designs[trimmed] = state.designs[oldName];
+      delete state.designs[oldName];
+    }
+    if (state.layoutOverrides[oldName]) {
+      state.layoutOverrides[trimmed] = state.layoutOverrides[oldName];
+      delete state.layoutOverrides[oldName];
+    }
+    if (state.wireWaypoints[oldName]) {
+      state.wireWaypoints[trimmed] = state.wireWaypoints[oldName];
+      delete state.wireWaypoints[oldName];
+    }
+    if (state.customizations[oldName]) {
+      state.customizations[trimmed] = state.customizations[oldName];
+      delete state.customizations[oldName];
+    }
+    state.openTabs = state.openTabs.map(t => t.name === oldName ? { ...t, name: trimmed } : t);
+    if (state.activeTab === oldName) state.activeTab = trimmed;
+    if (state.activeDesign === oldName) state.activeDesign = trimmed;
+    if (state.expandedModules[oldName]) {
+      state.expandedModules[trimmed] = state.expandedModules[oldName];
+      delete state.expandedModules[oldName];
+    }
+    renderTabs();
+    loadDesignList();
+    renderCanvas();
+    showToast(`已重命名: ${trimmed}`, 'success');
+  } catch (err) {
+    showToast('重命名失败: ' + err.message, 'error');
   }
 }
 
@@ -929,7 +1110,7 @@ function renderCanvas() {
       e.preventDefault();
       e.stopPropagation();
       if (!instName) return;
-      state.settingsTarget = { type: 'module', key: instName };
+      state.settingsTarget = { type: 'module', key: instName, modName };
       const customs = state.customizations[tab.name] || { modules: {} };
       const modCustom = customs.modules?.[instName] || {};
       const mod = modules[modName];
@@ -937,6 +1118,17 @@ function renderCanvas() {
       const outP = mod?.ports?.filter(p => p.direction === 'output').length || 0;
       showModuleInfoPopup(instName, modName, modCustom, inP, outP, e.clientX, e.clientY);
     });
+
+    // Click on ⚙ settings icon → open settings panel directly
+    const gearIcon = box.querySelector('.module-settings-icon');
+    if (gearIcon) {
+      gearIcon.addEventListener('click', e => {
+        e.stopPropagation();
+        if (!instName) return;
+        state.settingsTarget = { type: 'module', key: instName, modName };
+        openSettingsPanel();
+      });
+    }
 
     // Left-click: show comment popup (if comment exists)
     box.addEventListener('click', e => {
@@ -1025,6 +1217,7 @@ function renderCanvas() {
       // Don't clear box selection on background click — use close button
       if (state.selectedWireKey) {
         state.selectedWireKey = null;
+        state.selectedWireSignal = null;
         svgRoot.querySelectorAll('.wire-path.selected').forEach(p => p.classList.remove('selected'));
         svgRoot.querySelectorAll('.wire-selected').forEach(w => w.classList.remove('wire-selected'));
         updateInfoPanel(topMod, modules);
@@ -1061,8 +1254,10 @@ function renderCanvas() {
       if (!wireKey) return;
       if (state.selectedWireKey === wireKey) {
         state.selectedWireKey = null;
+        state.selectedWireSignal = null;
       } else {
         state.selectedWireKey = wireKey;
+        state.selectedWireSignal = signal;
       }
       // Update all wire highlights without full re-render
       svgRoot.querySelectorAll('.wire-group').forEach(wg2 => {
@@ -1091,9 +1286,29 @@ function renderCanvas() {
       pushUndoSnapshot();
       if (!state.wireWaypoints[tab.name]) state.wireWaypoints[tab.name] = {};
       if (!state.wireWaypoints[tab.name][wireKey]) state.wireWaypoints[tab.name][wireKey] = [];
-      state.wireWaypoints[tab.name][wireKey].push({ x: pt.x, y: pt.y });
-      // Sort waypoints by x (left to right)
-      state.wireWaypoints[tab.name][wireKey].sort((a, b) => a.x - b.x);
+      const arr = state.wireWaypoints[tab.name][wireKey];
+      const newWp = { x: pt.x, y: pt.y };
+      // Insert at the position along the existing waypoint sequence that minimises
+      // total path length change (nearest insertion gap).
+      if (arr.length === 0) {
+        arr.push(newWp);
+      } else {
+        // Build ordered vertex list: start → ...waypoints... → end
+        // We don't have src/dst here, so just find the nearest segment gap
+        // among existing waypoints by checking proximity to each gap midpoint.
+        let bestIdx = arr.length; // default: append at end
+        let bestDist = Infinity;
+        for (let k = 0; k <= arr.length; k++) {
+          const a = k === 0 ? null : arr[k - 1];
+          const b = k === arr.length ? null : arr[k];
+          // Use midpoint of the gap as a heuristic for nearest insertion
+          const mx = a && b ? (a.x + b.x) / 2 : (a ? a.x : b.x);
+          const my = a && b ? (a.y + b.y) / 2 : (a ? a.y : b.y);
+          const dist = Math.hypot(pt.x - mx, pt.y - my);
+          if (dist < bestDist) { bestDist = dist; bestIdx = k; }
+        }
+        arr.splice(bestIdx, 0, newWp);
+      }
       saveWireWaypoints(tab.name, state.wireWaypoints[tab.name]);
       renderCanvas();
     });
@@ -1108,6 +1323,33 @@ function renderCanvas() {
       const wireKey = wp.getAttribute('data-wire-key');
       const wpIdx = parseInt(wp.getAttribute('data-wp-index'));
       startWaypointDrag(e, wireKey, wpIdx, wp);
+    });
+
+    // Single click on waypoint: select its wire and auto-expand the waypoint panel
+    wp.addEventListener('click', e => {
+      e.stopPropagation();
+      const wireKey = wp.getAttribute('data-wire-key');
+      const wg = svgRoot.querySelector(`.wire-group[data-wire-key="${CSS.escape(wireKey)}"]`);
+      const signal = wg ? wg.getAttribute('data-signal') : wireKey;
+      state.selectedWireKey = wireKey;
+      state.selectedWireSignal = signal;
+      // Update wire highlight
+      svgRoot.querySelectorAll('.wire-group').forEach(wg2 => {
+        const wk = wg2.getAttribute('data-wire-key');
+        const isSel = wk === wireKey;
+        wg2.querySelectorAll('.wire-path').forEach(p => p.classList.toggle('selected', isSel));
+        wg2.classList.toggle('wire-selected', isSel);
+      });
+      showWireInfoPanel(wireKey, signal);
+      // Auto-expand the waypoint panel
+      if (!wpPanelExpanded) {
+        wpPanelExpanded = true;
+        const arrow = $('wp-panel-arrow');
+        const body = $('wp-panel-body');
+        if (arrow) arrow.textContent = '▼';
+        if (body) body.style.display = '';
+        renderWaypointList(wireKey, signal);
+      }
     });
 
     // Right-click to delete waypoint
@@ -1130,6 +1372,11 @@ function renderCanvas() {
 
   // Update info
   updateInfoPanel(topMod, modules);
+
+  // If a wire was selected, restore the wire info panel (updateInfoPanel hides it)
+  if (state.selectedWireKey) {
+    showWireInfoPanel(state.selectedWireKey, state.selectedWireSignal);
+  }
 
   // Highlight the currently viewed module in the canvas
   const currentTab = state.openTabs.find(t => t.name === state.activeTab);
@@ -1422,6 +1669,9 @@ function updateInfoPanel(modName, modules) {
     &nbsp;<span class="label">子实例:</span> <span class="value">${mod.instances?.length || 0}</span>
     &nbsp;<span class="label">线网:</span> <span class="value">${mod.wires?.length || 0}</span>
     &nbsp;<span style="color:#484f58;font-size:11px;">| 单击线选中 | 双击线添加拐点 | 右键拐点删除 | 拖拽标题移动 | 右下角调整大小 | 滚轮缩放</span>`;
+  // Hide waypoint panel when viewing module info
+  const wpPanel = $('wp-panel');
+  if (wpPanel) wpPanel.style.display = 'none';
 }
 
 function showWireInfoPanel(wireKey, signal) {
@@ -1443,20 +1693,158 @@ function showWireInfoPanel(wireKey, signal) {
   const dstInst = dstParts[0] || '?';
   const dstPort = dstParts.slice(1).join('.') || '?';
 
-  // Count waypoints
   const tab = state.openTabs.find(t => t.name === state.activeTab);
-  const wpCount = tab ? (state.wireWaypoints[tab.name]?.[wireKey]?.length || 0) : 0;
+  const wps = tab ? (state.wireWaypoints[tab.name]?.[wireKey] || []) : [];
 
   content.innerHTML = `
     <span class="label">🔌 线路:</span> <span class="value" style="color:#4fc3f7">${signal || wireKey}</span> &nbsp;
     <span class="label">源:</span> <span class="value" style="color:#ef5350">${srcInst}</span>.<span class="value">${srcPort}</span> &nbsp;
     <span class="label">→ 目标:</span> <span class="value" style="color:#81c784">${dstInst}</span>.<span class="value">${dstPort}</span>
-    &nbsp;<span class="label">拐点:</span> <span class="value">${wpCount}</span>
+    &nbsp;<span class="label">拐点:</span> <span class="value">${wps.length}</span>
     &nbsp;<span style="color:#484f58;font-size:11px;">| 双击添加拐点 | 右键拐点删除 | 单击空白取消选中</span>`;
+
+  updateWaypointPanel(wireKey, signal);
+}
+
+// ─── Waypoint management panel ──────────────────────────────────────────
+
+let wpPanelExpanded = false;
+
+function updateWaypointPanel(wireKey, signal) {
+  const wpPanel = $('wp-panel');
+  const wpBody = $('wp-panel-body');
+  const wpTitle = $('wp-panel-title');
+  const wpArrow = $('wp-panel-arrow');
+  if (!wpPanel) return;
+
+  if (!wireKey) { wpPanel.style.display = 'none'; return; }
+  wpPanel.style.display = '';
+
+  const tab = state.openTabs.find(t => t.name === state.activeTab);
+  const wps = tab ? (state.wireWaypoints[tab.name]?.[wireKey] || []) : [];
+  wpTitle.textContent = `拐点 (${wps.length})`;
+  wpArrow.textContent = wpPanelExpanded ? '▼' : '▶';
+  wpBody.style.display = wpPanelExpanded ? '' : 'none';
+
+  // Setup toggle  
+  const header = $('wp-panel-header');
+  header.onclick = () => {
+    wpPanelExpanded = !wpPanelExpanded;
+    wpArrow.textContent = wpPanelExpanded ? '▼' : '▶';
+    wpBody.style.display = wpPanelExpanded ? '' : 'none';
+    if (wpPanelExpanded) renderWaypointList(wireKey, signal);
+  };
+
+  if (wpPanelExpanded) renderWaypointList(wireKey, signal);
+}
+
+function renderWaypointList(wireKey, signal) {
+  const wpBody = $('wp-panel-body');
+  if (!wpBody || !wireKey) return;
+
+  const tab = state.openTabs.find(t => t.name === state.activeTab);
+  const wps = tab ? (state.wireWaypoints[tab.name]?.[wireKey] || []) : [];
+  const svgRoot = getSVGRoot();
+
+  // Clear highlight on all waypoints
+  svgRoot.querySelectorAll('.wire-waypoint').forEach(el => el.style.outline = '');
+
+  if (wps.length === 0) {
+    wpBody.innerHTML = '<span style="color:#484f58;font-size:11px;">暂无拐点，双击线添加</span>';
+    return;
+  }
+
+  wpBody.innerHTML = '';
+  wps.forEach((wp, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:4px;padding:2px 0;border-bottom:1px solid #21262d;';
+    row.innerHTML = `
+      <span style="color:#ffb74d;font-size:11px;min-width:18px;text-align:right;">${i + 1}</span>
+      <span style="color:#8b949e;font-size:11px;flex:1;">(${wp.x.toFixed(1)}, ${wp.y.toFixed(1)})</span>
+      <button data-act="up"   title="上移" style="background:none;border:none;color:#8b949e;cursor:pointer;padding:0 2px;font-size:12px;${i === 0 ? 'opacity:0.25;cursor:default;' : ''}" ${i === 0 ? 'disabled' : ''}>▲</button>
+      <button data-act="down" title="下移" style="background:none;border:none;color:#8b949e;cursor:pointer;padding:0 2px;font-size:12px;${i === wps.length - 1 ? 'opacity:0.25;cursor:default;' : ''}" ${i === wps.length - 1 ? 'disabled' : ''}>▼</button>
+      <button data-act="del"  title="删除" style="background:none;border:none;color:#ef5350;cursor:pointer;padding:0 2px;font-size:12px;">✕</button>`;
+
+    // Highlight corresponding circle on hover
+    row.addEventListener('mouseenter', () => {
+      const circle = svgRoot.querySelector(`.wire-waypoint[data-wire-key="${CSS.escape(wireKey)}"][data-wp-index="${i}"]`);
+      if (circle) { circle.setAttribute('r', LAYOUT?.WAYPOINT_R ? LAYOUT.WAYPOINT_R * 1.8 : 9); circle.style.fill = '#ffeb3b'; }
+    });
+    row.addEventListener('mouseleave', () => {
+      const circle = svgRoot.querySelector(`.wire-waypoint[data-wire-key="${CSS.escape(wireKey)}"][data-wp-index="${i}"]`);
+      if (circle) { circle.setAttribute('r', LAYOUT?.WAYPOINT_R || 5); circle.style.fill = ''; }
+    });
+
+    // Click to pan/zoom to waypoint
+    row.querySelector('span:nth-child(2)').style.cursor = 'pointer';
+    row.querySelector('span:nth-child(2)').addEventListener('click', () => {
+      const container = $('canvas-container');
+      const cw = container.clientWidth;
+      const ch = container.clientHeight;
+      state.pan.x = cw / 2 - wp.x * state.zoom;
+      state.pan.y = ch / 2 - wp.y * state.zoom;
+      applyTransform();
+      if (state.activeTab) saveViewState(state.activeTab, { pan: { ...state.pan }, zoom: state.zoom });
+    });
+
+    row.querySelector('[data-act="up"]').addEventListener('click', () => {
+      if (i === 0) return;
+      pushUndoSnapshot();
+      const arr = state.wireWaypoints[tab.name][wireKey];
+      [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]];
+      saveWireWaypoints(tab.name, state.wireWaypoints[tab.name]);
+      renderCanvas();
+      renderWaypointList(wireKey, signal);
+    });
+    row.querySelector('[data-act="down"]').addEventListener('click', () => {
+      if (i >= wps.length - 1) return;
+      pushUndoSnapshot();
+      const arr = state.wireWaypoints[tab.name][wireKey];
+      [arr[i], arr[i + 1]] = [arr[i + 1], arr[i]];
+      saveWireWaypoints(tab.name, state.wireWaypoints[tab.name]);
+      renderCanvas();
+      renderWaypointList(wireKey, signal);
+    });
+    row.querySelector('[data-act="del"]').addEventListener('click', () => {
+      pushUndoSnapshot();
+      state.wireWaypoints[tab.name][wireKey].splice(i, 1);
+      if (state.wireWaypoints[tab.name][wireKey].length === 0)
+        delete state.wireWaypoints[tab.name][wireKey];
+      saveWireWaypoints(tab.name, state.wireWaypoints[tab.name]);
+      renderCanvas();
+      // Refresh wire info after delete
+      showWireInfoPanel(wireKey, signal);
+    });
+
+    // Drag-to-reorder row via HTML5 drag
+    row.draggable = true;
+    row.dataset.idx = i;
+    row.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', i); row.style.opacity = '0.5'; });
+    row.addEventListener('dragend', () => { row.style.opacity = ''; });
+    row.addEventListener('dragover', e => { e.preventDefault(); row.style.background = '#30363d'; });
+    row.addEventListener('dragleave', () => { row.style.background = ''; });
+    row.addEventListener('drop', e => {
+      e.preventDefault(); row.style.background = '';
+      const fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
+      const toIdx = i;
+      if (fromIdx === toIdx) return;
+      pushUndoSnapshot();
+      const arr = state.wireWaypoints[tab.name][wireKey];
+      const [moved] = arr.splice(fromIdx, 1);
+      arr.splice(toIdx, 0, moved);
+      saveWireWaypoints(tab.name, state.wireWaypoints[tab.name]);
+      renderCanvas();
+      renderWaypointList(wireKey, signal);
+    });
+
+    wpBody.appendChild(row);
+  });
 }
 
 function closeInfoPanel() {
   $('info-panel').style.display = 'none';
+  const wpPanel = $('wp-panel');
+  if (wpPanel) wpPanel.style.display = 'none';
   const settingsBtn = $('info-settings');
   if (settingsBtn) settingsBtn.style.display = 'none';
   state.settingsTarget = null;
@@ -1640,6 +2028,7 @@ function doUndo() {
   saveLayout(name, state.layoutOverrides[name]);
   saveWireWaypoints(name, state.wireWaypoints[name]);
   renderCanvas();
+  if (state.selectedWireKey) showWireInfoPanel(state.selectedWireKey, state.selectedWireSignal);
   showToast('已撤销', 'info');
 }
 
@@ -1661,6 +2050,7 @@ function doRedo() {
   saveLayout(name, state.layoutOverrides[name]);
   saveWireWaypoints(name, state.wireWaypoints[name]);
   renderCanvas();
+  if (state.selectedWireKey) showWireInfoPanel(state.selectedWireKey, state.selectedWireSignal);
   showToast('已重做', 'info');
 }
 
@@ -1674,38 +2064,101 @@ function openSettingsPanel() {
   const content = $('settings-content');
   content.innerHTML = '';
 
+  // Collect unique colors already used in the current design (from module customizations)
+  const usedColors = [...new Set(
+    Object.values(customs.modules || {}).map(m => m.color).filter(c => c && c !== '#1c2333')
+  )];
+
+  // Build color swatch HTML for presets
+  function buildSwatches(inputId) {
+    if (usedColors.length === 0) return '';
+    const swatches = usedColors.map(c =>
+      `<span title="${c}" onclick="document.getElementById('${inputId}').value='${c}';document.getElementById('${inputId}-hex').value='${c}'" style="display:inline-block;width:20px;height:20px;border-radius:4px;background:${c};cursor:pointer;border:1px solid #30363d;flex-shrink:0;"></span>`
+    ).join('');
+    return `<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-top:4px;">${swatches}</div>`;
+  }
+
   if (target.type === 'module') {
     const existing = customs.modules?.[target.key] || {};
+    const modColor = existing.color || '#1c2333';
+
+    // Look up module port info
+    const modName = target.modName || '';
+    const tab = state.openTabs.find(t => t.name === state.activeTab);
+    const design = state.designs[state.activeTab];
+    const mod = design?.modules?.[modName];
+    const inPorts = mod?.ports?.filter(p => p.direction === 'input') || [];
+    const outPorts = mod?.ports?.filter(p => p.direction === 'output') || [];
+
+    // Build port info HTML
+    let portInfoHtml = '';
+    if (inPorts.length || outPorts.length) {
+      const portRow = (p) => {
+        const w = p.width > 1 ? `[${(p.msb !== undefined ? p.msb : p.width - 1)}:${p.lsb !== undefined ? p.lsb : 0}]` : '';
+        return `<tr><td style="color:#c9d1d9;font-family:monospace;font-size:11px;padding:2px 8px 2px 0;">${p.name}</td><td style="color:#8b949e;font-size:11px;padding:2px 0;">${w || '1 bit'}</td></tr>`;
+      };
+      portInfoHtml = `<div style="margin-top:14px;border-top:1px solid #30363d;padding-top:10px;">
+        <h4 style="color:#8b949e;margin-bottom:8px;font-size:12px;">端口信息 (${modName})</h4>`;
+      if (inPorts.length) {
+        portInfoHtml += `<div style="margin-bottom:8px;"><span style="color:#81c784;font-size:11px;font-weight:600;">⬇ 输入 (${inPorts.length})</span>
+          <table style="margin-top:4px;">${inPorts.map(portRow).join('')}</table></div>`;
+      }
+      if (outPorts.length) {
+        portInfoHtml += `<div><span style="color:#ef5350;font-size:11px;font-weight:600;">⬆ 输出 (${outPorts.length})</span>
+          <table style="margin-top:4px;">${outPorts.map(portRow).join('')}</table></div>`;
+      }
+      portInfoHtml += '</div>';
+    }
+
     content.innerHTML = `
       <h4 style="color:#c9d1d9;margin-bottom:12px;">模块设置: ${target.key}</h4>
       <div class="settings-row">
         <label>颜色</label>
-        <input type="color" id="set-mod-color" value="${existing.color || '#1c2333'}" />
-        <button class="btn-secondary" onclick="document.getElementById('set-mod-color').value='#1c2333'" style="padding:4px 8px;font-size:11px;">重置</button>
+        <input type="color" id="set-mod-color" value="${modColor}" oninput="document.getElementById('set-mod-color-hex').value=this.value" />
+        <input type="text" id="set-mod-color-hex" value="${modColor}" maxlength="7" placeholder="#rrggbb"
+          style="width:70px;padding:4px 6px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:12px;font-family:monospace;"
+          oninput="if(/^#[0-9a-fA-F]{6}$/.test(this.value))document.getElementById('set-mod-color').value=this.value" />
+        <button class="btn-secondary" onclick="document.getElementById('set-mod-color').value='#1c2333';document.getElementById('set-mod-color-hex').value='#1c2333'" style="padding:4px 8px;font-size:11px;">重置</button>
       </div>
-      <div class="settings-row">
+      ${buildSwatches('set-mod-color')}
+      <div class="settings-row" style="margin-top:10px;">
         <label>重命名</label>
         <input type="text" id="set-mod-rename" placeholder="自定义显示名称..." value="${existing.rename || ''}" />
       </div>
-      <div class="settings-row">
+      <div class="settings-row settings-row-grow">
         <label>注释</label>
-        <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
-          <textarea id="set-mod-comment" placeholder="支持 Markdown 格式...">${existing.comment || ''}</textarea>
+        <div style="flex:1;display:flex;flex-direction:column;gap:6px;min-height:0;">
+          <textarea id="set-mod-comment" placeholder="支持 Markdown 格式..." style="flex:1;resize:none;min-height:60px;">${existing.comment || ''}</textarea>
           <button class="btn-secondary" onclick="document.getElementById('comment-file-input').click()" style="align-self:flex-start;padding:4px 10px;font-size:11px;">📂 导入 .md 文件</button>
         </div>
-      </div>`;
+      </div>
+      ${portInfoHtml}`;
   } else if (target.type === 'wire') {
     const existing = customs.wires?.[target.key] || {};
+    const wireColor = existing.color || '#4fc3f7';
     content.innerHTML = `
       <h4 style="color:#c9d1d9;margin-bottom:12px;">线路设置: ${target.key}</h4>
       <div class="settings-row">
         <label>颜色</label>
-        <input type="color" id="set-wire-color" value="${existing.color || '#4fc3f7'}" />
-        <button class="btn-secondary" onclick="document.getElementById('set-wire-color').value='#4fc3f7'" style="padding:4px 8px;font-size:11px;">重置</button>
-      </div>`;
+        <input type="color" id="set-wire-color" value="${wireColor}" oninput="document.getElementById('set-wire-color-hex').value=this.value" />
+        <input type="text" id="set-wire-color-hex" value="${wireColor}" maxlength="7" placeholder="#rrggbb"
+          style="width:70px;padding:4px 6px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:12px;font-family:monospace;"
+          oninput="if(/^#[0-9a-fA-F]{6}$/.test(this.value))document.getElementById('set-wire-color').value=this.value" />
+        <button class="btn-secondary" onclick="document.getElementById('set-wire-color').value='#4fc3f7';document.getElementById('set-wire-color-hex').value='#4fc3f7'" style="padding:4px 8px;font-size:11px;">重置</button>
+      </div>
+      ${buildSwatches('set-wire-color')}`;
   }
 
   $('settings-overlay').style.display = 'flex';
+
+  // Restore saved size
+  const modal = $('settings-overlay').querySelector('.settings-modal');
+  if (modal) {
+    const saved = loadSettingsModalSize();
+    modal.style.width = saved.w + 'px';
+    modal.style.height = saved.h + 'px';
+    initSettingsModalResize(modal);
+  }
 }
 
 function closeSettingsModal() {
@@ -1878,6 +2331,41 @@ function initCommentPopupResize(popup) {
 }
 
 /**
+ * Attach drag-to-resize behavior to the settings modal.
+ * Runs only once (guarded by a flag). Saves final size to localStorage on mouseup.
+ */
+function initSettingsModalResize(modal) {
+  const handle = $('settings-modal-resize');
+  if (!handle || handle._resizeAttached) return;
+  handle._resizeAttached = true;
+
+  handle.addEventListener('mousedown', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    window._settingsResizing = true;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startW = modal.offsetWidth;
+    const startH = modal.offsetHeight;
+
+    const onMove = (ev) => {
+      const newW = Math.max(320, startW + ev.clientX - startX);
+      const newH = Math.max(200, startH + ev.clientY - startY);
+      modal.style.width = newW + 'px';
+      modal.style.height = newH + 'px';
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      saveSettingsModalSize(modal.offsetWidth, modal.offsetHeight);
+      setTimeout(() => { window._settingsResizing = false; }, 200);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
+/**
  * Handle importing a .md file as module comment.
  * Fills the comment textarea in the settings modal, and saves a copy
  * server-side at data/<design_name>/<inst_name>.md.
@@ -1926,7 +2414,8 @@ function applySettings() {
   const customs = state.customizations[state.activeTab];
 
   if (target.type === 'module') {
-    const color = $('set-mod-color')?.value;
+    const hexVal = $('set-mod-color-hex')?.value;
+    const color = (/^#[0-9a-fA-F]{6}$/.test(hexVal) ? hexVal : null) || $('set-mod-color')?.value;
     const rename = $('set-mod-rename')?.value?.trim() || '';
     const comment = $('set-mod-comment')?.value?.trim() || '';
     if (!customs.modules) customs.modules = {};
@@ -1939,7 +2428,8 @@ function applySettings() {
       delete customs.modules[target.key];
     }
   } else if (target.type === 'wire') {
-    const color = $('set-wire-color')?.value;
+    const hexVal = $('set-wire-color-hex')?.value;
+    const color = (/^#[0-9a-fA-F]{6}$/.test(hexVal) ? hexVal : null) || $('set-wire-color')?.value;
     if (!customs.wires) customs.wires = {};
     if (color && color !== '#4fc3f7') {
       customs.wires[target.key] = { color };
@@ -1949,6 +2439,8 @@ function applySettings() {
   }
 
   saveCustomizations(state.activeTab, customs);
+  // Persist full state (including customizations) to server JSON
+  scheduleSyncToServer(state.activeTab);
   closeSettingsModal();
   renderCanvas();
   showToast('设置已应用', 'success');

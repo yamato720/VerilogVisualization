@@ -7,12 +7,21 @@ and server-side file system browsing.
 import os
 import json
 import io
+import re
 import subprocess
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory
 from verilog_parser import analyze_and_save, parse_verilog_file, parse_verilog_folder, build_hierarchy
+from chisel_parser import (
+    parse_chisel_folder, list_scala_files, get_modules_in_file,
+    detect_package, create_chisel_file, save_module_to_file, parse_chisel_file,
+    is_file_editable, save_canvas_to_file
+)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, 'data')
+VERILOG_DATA_DIR = os.path.join(BASE_DIR, 'data', 'VerilogVisualization')
+CHISEL_DATA_DIR = os.path.join(BASE_DIR, 'data', 'ChiselEdit')
+DATA_DIR = VERILOG_DATA_DIR  # backward compat alias for existing Verilog endpoints
+IMPORT_SCALA_PATH = os.path.join(BASE_DIR, 'import.scala')
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 
@@ -24,6 +33,11 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # Disable static file caching durin
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/block-design')
+def block_design():
+    return render_template('block_design.html')
 
 
 @app.route('/api/browse', methods=['POST'])
@@ -206,6 +220,40 @@ def get_design(name):
     return jsonify(data)
 
 
+@app.route('/api/rename', methods=['POST'])
+def rename_design():
+    """Rename a saved design (renames the JSON file and its comment folder)."""
+    data = request.get_json() or {}
+    old_name = data.get('old_name', '').strip()
+    new_name = data.get('new_name', '').strip()
+
+    if not old_name or not new_name:
+        return jsonify({'error': 'old_name and new_name required'}), 400
+
+    # Basic sanitization: only allow alphanumeric, underscore, hyphen, dot
+    if not re.match(r'^[\w\-.]+$', new_name):
+        return jsonify({'error': 'Invalid name: only letters, digits, _ - . allowed'}), 400
+
+    old_json = os.path.join(DATA_DIR, f"{old_name}.json")
+    new_json = os.path.join(DATA_DIR, f"{new_name}.json")
+
+    if not os.path.exists(old_json):
+        return jsonify({'error': f'Design not found: {old_name}'}), 404
+    if os.path.exists(new_json):
+        return jsonify({'error': f'Name already in use: {new_name}'}), 409
+
+    # Rename JSON file
+    os.rename(old_json, new_json)
+
+    # Rename comment folder if it exists
+    old_comment_dir = os.path.join(DATA_DIR, old_name)
+    new_comment_dir = os.path.join(DATA_DIR, new_name)
+    if os.path.isdir(old_comment_dir):
+        os.rename(old_comment_dir, new_comment_dir)
+
+    return jsonify({'success': True, 'new_name': new_name})
+
+
 @app.route('/api/delete/<name>', methods=['DELETE'])
 def delete_design(name):
     """Delete a saved design."""
@@ -214,6 +262,47 @@ def delete_design(name):
         os.remove(json_path)
         return jsonify({'success': True})
     return jsonify({'error': 'Not found'}), 404
+
+
+@app.route('/api/save_customizations', methods=['POST'])
+def save_customizations():
+    """Persist UI customizations (colors, renames, comments) into the design JSON."""
+    data = request.get_json()
+    name = data.get('name', '')
+    customizations = data.get('customizations', {})
+    if not name:
+        return jsonify({'error': 'name required'}), 400
+    safe_name = os.path.basename(name)
+    json_path = os.path.join(DATA_DIR, f"{safe_name}.json")
+    if not os.path.exists(json_path):
+        return jsonify({'error': 'Design not found'}), 404
+    with open(json_path, 'r', encoding='utf-8') as f:
+        design_data = json.load(f)
+    design_data['customizations'] = customizations
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(design_data, f, ensure_ascii=False, indent=2)
+    return jsonify({'success': True})
+
+
+@app.route('/api/save_state', methods=['POST'])
+def save_state():
+    """Persist full UI state (layout, wire_waypoints, view_state, customizations) into the design JSON."""
+    data = request.get_json()
+    name = data.get('name', '')
+    if not name:
+        return jsonify({'error': 'name required'}), 400
+    safe_name = os.path.basename(name)
+    json_path = os.path.join(DATA_DIR, f"{safe_name}.json")
+    if not os.path.exists(json_path):
+        return jsonify({'error': 'Design not found'}), 404
+    with open(json_path, 'r', encoding='utf-8') as f:
+        design_data = json.load(f)
+    for key in ('layout', 'wire_waypoints', 'view_state', 'customizations'):
+        if key in data:
+            design_data[key] = data[key]
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(design_data, f, ensure_ascii=False, indent=2)
+    return jsonify({'success': True})
 
 
 @app.route('/api/save_comment', methods=['POST'])
@@ -319,8 +408,308 @@ svg {{ max-width: 100%; height: auto; }}
                      as_attachment=True, download_name=f"{name}.html")
 
 
+# ─── Chisel / Block Design API Endpoints ─────────────────────────────────
+
+@app.route('/api/chisel/browse', methods=['POST'])
+def chisel_browse():
+    """Browse filesystem for Chisel source folders. Shows directories and .scala files."""
+    data = request.get_json() or {}
+    path = data.get('path', os.path.expanduser('~'))
+    path = os.path.expanduser(path)
+
+    if not os.path.exists(path):
+        path = os.path.dirname(path)
+        if not os.path.exists(path):
+            path = os.path.expanduser('~')
+
+    if os.path.isfile(path):
+        path = os.path.dirname(path)
+
+    try:
+        entries = []
+        for name in sorted(os.listdir(path), key=lambda x: (not os.path.isdir(os.path.join(path, x)), x.lower())):
+            if name.startswith('.'):
+                continue
+            full = os.path.join(path, name)
+            is_dir = os.path.isdir(full)
+            is_scala = name.endswith('.scala')
+            if is_dir or is_scala:
+                has_scala = False
+                if is_dir:
+                    try:
+                        has_scala = any(f.endswith('.scala')
+                                       for f in os.listdir(full)
+                                       if os.path.isfile(os.path.join(full, f)))
+                    except PermissionError:
+                        pass
+                entries.append({
+                    'name': name,
+                    'path': full,
+                    'is_dir': is_dir,
+                    'is_scala': is_scala,
+                    'has_scala': has_scala,
+                })
+
+        return jsonify({
+            'current': os.path.abspath(path),
+            'parent': os.path.dirname(os.path.abspath(path)),
+            'entries': entries,
+        })
+    except PermissionError:
+        return jsonify({'error': 'Permission denied', 'current': path, 'parent': os.path.dirname(path), 'entries': []}), 403
+
+
+@app.route('/api/chisel/list_files', methods=['POST'])
+def chisel_list_files():
+    """List .scala files in the given folder."""
+    data = request.get_json() or {}
+    folder = data.get('folder', '')
+    if not folder or not os.path.isdir(folder):
+        return jsonify({'error': 'Invalid folder path'}), 400
+
+    files = list_scala_files(folder)
+    return jsonify({'folder': folder, 'files': files})
+
+
+@app.route('/api/chisel/parse_file', methods=['POST'])
+def chisel_parse_file():
+    """Parse a single .scala file and return its modules."""
+    data = request.get_json() or {}
+    file_path = data.get('path', '')
+    if not file_path or not os.path.isfile(file_path):
+        return jsonify({'error': 'Invalid file path'}), 400
+
+    modules = get_modules_in_file(file_path)
+    editable = is_file_editable(file_path)
+    return jsonify({'file': file_path, 'modules': modules, 'editable': editable})
+
+
+@app.route('/api/chisel/parse_folder', methods=['POST'])
+def chisel_parse_folder():
+    """Parse all .scala files in a folder and return all modules."""
+    data = request.get_json() or {}
+    folder = data.get('folder', '')
+    if not folder or not os.path.isdir(folder):
+        return jsonify({'error': 'Invalid folder path'}), 400
+
+    all_modules = parse_chisel_folder(folder)
+    return jsonify({'folder': folder, 'modules': all_modules})
+
+
+@app.route('/api/chisel/save_canvas', methods=['POST'])
+def chisel_save_canvas():
+    """Save canvas state (instances + wires + pins) back to the Chisel source file."""
+    data = request.get_json() or {}
+    file_path = data.get('file_path', '')
+    module_name = data.get('module_name', '')
+    ports = data.get('ports', [])
+    instances = data.get('instances', [])
+    wires = data.get('wires', [])
+    params = data.get('params', [])
+
+    if not file_path or not os.path.isfile(file_path):
+        return jsonify({'error': 'Invalid file path'}), 400
+    if not module_name:
+        return jsonify({'error': 'Module name required'}), 400
+    if not re.match(r'^[A-Za-z_]\w*$', module_name):
+        return jsonify({'error': 'Invalid module name'}), 400
+    if not is_file_editable(file_path):
+        return jsonify({'error': '文件缺少 // editable 标记，不可编辑'}), 403
+
+    # Gather port info for all modules (for wire direction resolution)
+    folder = os.path.dirname(file_path)
+    all_mods = parse_chisel_folder(folder)
+    all_modules_ports = {n: m['ports'] for n, m in all_mods.items()}
+
+    try:
+        save_canvas_to_file(file_path, module_name, ports, instances, wires, all_modules_ports, params=params)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/chisel/create_file', methods=['POST'])
+def chisel_create_file():
+    """Create a new .scala file with package and imports."""
+    data = request.get_json() or {}
+    folder = data.get('folder', '')
+    file_name = data.get('file_name', '')
+
+    if not folder or not os.path.isdir(folder):
+        return jsonify({'error': 'Invalid folder path'}), 400
+    if not file_name:
+        return jsonify({'error': 'File name required'}), 400
+
+    # Sanitize file name
+    safe_name = os.path.basename(file_name)
+    if not safe_name:
+        return jsonify({'error': 'Invalid file name'}), 400
+
+    try:
+        path = create_chisel_file(folder, safe_name, IMPORT_SCALA_PATH)
+        # Auto-create a default module named after the file
+        default_module = ''
+        base = os.path.splitext(os.path.basename(safe_name))[0]
+        if base and base[0].isalpha():
+            default_module = base[0].upper() + base[1:]
+            try:
+                save_module_to_file(path, default_module, [])
+            except Exception:
+                default_module = ''
+        return jsonify({'success': True, 'path': path, 'name': os.path.basename(path), 'default_module': default_module})
+    except FileExistsError as e:
+        return jsonify({'error': str(e)}), 409
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/chisel/save_module', methods=['POST'])
+def chisel_save_module():
+    """Save/update a module definition in a .scala file."""
+    data = request.get_json() or {}
+    file_path = data.get('file_path', '')
+    module_name = data.get('module_name', '')
+    ports = data.get('ports', [])
+
+    if not file_path or not os.path.isfile(file_path):
+        return jsonify({'error': 'Invalid file path'}), 400
+    if not module_name:
+        return jsonify({'error': 'Module name required'}), 400
+
+    # Validate module_name is a valid identifier
+    if not re.match(r'^[A-Za-z_]\w*$', module_name):
+        return jsonify({'error': 'Invalid module name'}), 400
+
+    try:
+        save_module_to_file(file_path, module_name, ports)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/chisel/read_file', methods=['POST'])
+def chisel_read_file():
+    """Read the content of a .scala file."""
+    data = request.get_json() or {}
+    file_path = data.get('path', '')
+    if not file_path or not os.path.isfile(file_path):
+        return jsonify({'error': 'Invalid file path'}), 400
+    if not file_path.endswith('.scala'):
+        return jsonify({'error': 'Not a .scala file'}), 400
+
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    return jsonify({'path': file_path, 'content': content})
+
+
+# ─── Chisel Block Design State Persistence ──────────────────────────────
+
+@app.route('/api/chisel/designs')
+def chisel_list_designs():
+    """List all saved Chisel block design states."""
+    os.makedirs(CHISEL_DATA_DIR, exist_ok=True)
+    designs = []
+    for fname in sorted(os.listdir(CHISEL_DATA_DIR)):
+        if fname.endswith('.json'):
+            name = fname[:-5]
+            json_path = os.path.join(CHISEL_DATA_DIR, fname)
+            try:
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                designs.append({
+                    'name': name,
+                    'folder': data.get('folder', ''),
+                    'module_count': len(data.get('canvasData', {})),
+                })
+            except Exception:
+                designs.append({'name': name, 'folder': '', 'module_count': 0})
+    return jsonify(designs)
+
+
+@app.route('/api/chisel/design/<name>')
+def chisel_get_design(name):
+    """Get a specific Chisel block design state."""
+    safe_name = os.path.basename(name)
+    json_path = os.path.join(CHISEL_DATA_DIR, f"{safe_name}.json")
+    if not os.path.exists(json_path):
+        return jsonify({'error': 'Design not found'}), 404
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    return jsonify(data)
+
+
+@app.route('/api/chisel/save_design_state', methods=['POST'])
+def chisel_save_design_state():
+    """Save full Chisel block design state (canvas, customizations, layout) to server JSON."""
+    data = request.get_json()
+    name = data.get('name', '')
+    if not name:
+        return jsonify({'error': 'name required'}), 400
+
+    safe_name = os.path.basename(name)
+    if not re.match(r'^[\w\-.\u4e00-\u9fff]+$', safe_name):
+        return jsonify({'error': 'Invalid name'}), 400
+
+    os.makedirs(CHISEL_DATA_DIR, exist_ok=True)
+    json_path = os.path.join(CHISEL_DATA_DIR, f"{safe_name}.json")
+
+    # Merge with existing data if present
+    existing = {}
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                existing = json.load(f)
+        except Exception:
+            pass
+
+    for key in ('folder', 'selectedFile', 'canvasData', 'customizations',
+                'nextInstanceId', 'nextWireId'):
+        if key in data:
+            existing[key] = data[key]
+
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(existing, f, ensure_ascii=False, indent=2)
+    return jsonify({'success': True})
+
+
+@app.route('/api/chisel/delete_design/<name>', methods=['DELETE'])
+def chisel_delete_design(name):
+    """Delete a saved Chisel block design state."""
+    safe_name = os.path.basename(name)
+    json_path = os.path.join(CHISEL_DATA_DIR, f"{safe_name}.json")
+    if os.path.exists(json_path):
+        os.remove(json_path)
+        return jsonify({'success': True})
+    return jsonify({'error': 'Not found'}), 404
+
+
+def _migrate_data_dir():
+    """Migrate old flat data/ JSON files into data/VerilogVisualization/."""
+    old_data = os.path.join(BASE_DIR, 'data')
+    if not os.path.isdir(old_data):
+        return
+    for fname in os.listdir(old_data):
+        full = os.path.join(old_data, fname)
+        if fname.endswith('.json') and os.path.isfile(full):
+            dest = os.path.join(VERILOG_DATA_DIR, fname)
+            if not os.path.exists(dest):
+                os.rename(full, dest)
+                print(f"  migrated {fname} → data/VerilogVisualization/")
+        elif os.path.isdir(full) and fname not in ('VerilogVisualization', 'ChiselEdit'):
+            # Comment subfolder — move it
+            dest = os.path.join(VERILOG_DATA_DIR, fname)
+            if not os.path.exists(dest):
+                os.rename(full, dest)
+                print(f"  migrated {fname}/ → data/VerilogVisualization/")
+
+
 if __name__ == '__main__':
-    os.makedirs(DATA_DIR, exist_ok=True)
-    print(f"Data directory: {DATA_DIR}")
-    print(f"Starting Verilog Visualizer on http://127.0.0.1:5000")
-    app.run(host='127.0.0.1', port=5000, debug=True)
+    os.makedirs(VERILOG_DATA_DIR, exist_ok=True)
+    os.makedirs(CHISEL_DATA_DIR, exist_ok=True)
+    _migrate_data_dir()
+    host = os.environ.get('VV_HOST', '127.0.0.1')
+    port = int(os.environ.get('VV_PORT', 5000))
+    print(f"Verilog data: {VERILOG_DATA_DIR}")
+    print(f"Chisel data:  {CHISEL_DATA_DIR}")
+    print(f"Starting Verilog Visualizer on http://{host}:{port}")
+    app.run(host=host, port=port, debug=True)

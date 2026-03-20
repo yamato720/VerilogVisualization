@@ -215,6 +215,18 @@ function renderModuleBox(mod, x, y, opts = {}) {
     g.appendChild(ei);
   }
 
+  // Settings gear icon (for non-top instances)
+  if (instName) {
+    const hasExpand = mod.instances && mod.instances.length > 0;
+    const gearX = hasExpand ? W - 24 : W - 8;
+    const gear = svgEl('text', {
+      class: 'module-settings-icon', x: gearX, y: LAYOUT.MODULE_HEADER_H / 2 + 4,
+      'text-anchor': 'end', fill: '#8b949e', 'font-size': 11, style: 'cursor:pointer;',
+    });
+    gear.textContent = '⚙';
+    g.appendChild(gear);
+  }
+
   const portPositions = {};  // portName -> { x (abs), y (abs), side }
   let curY = LAYOUT.MODULE_HEADER_H + LAYOUT.PORT_GAP * 2;
 
@@ -611,6 +623,18 @@ function drawWire(x1, y1, x2, y2, isBus, signalName, wireIdx, totalWires, wireKe
         style: 'cursor:move;',
       });
       g.appendChild(circle);
+      // Sequence number badge (shown above the circle)
+      const label = svgEl('text', {
+        class: 'wire-waypoint-label',
+        x: wp.x, y: wp.y - LAYOUT.WAYPOINT_R - 2,
+        'text-anchor': 'middle',
+        'font-size': 9,
+        fill: COL.waypoint,
+        'pointer-events': 'none',
+        'data-wire-key': wireKey, 'data-wp-index': i,
+      });
+      label.textContent = i + 1;
+      g.appendChild(label);
     });
   }
 
@@ -966,4 +990,23 @@ function renderDesignView(topModName, allModules, expandedModules, collapsedStat
   }
 
   return rootG;
+}
+
+// ─── Public helper for app.js ─────────────────────────────────────────
+// Pre-compute initial grid positions for all instances of a module and
+// return them as a layoutOverrides-compatible object (instName → {x, y}).
+// Only entries that are NOT already present in existingOverrides are added.
+function computeInitialLayout(topModName, allModules, collapsedState, existingOverrides, hideClockReset) {
+  const topMod = allModules[topModName];
+  if (!topMod) return {};
+  const result = {};
+  const layout = layoutInstances(topMod.instances, allModules, collapsedState, existingOverrides || {}, hideClockReset);
+  layout.forEach(item => {
+    const key = item.instance.instance_name;
+    // Only record position if not already stored (don't overwrite user-moved modules)
+    if (!existingOverrides?.[key]) {
+      result[key] = { x: item.x, y: item.y };
+    }
+  });
+  return result;
 }
