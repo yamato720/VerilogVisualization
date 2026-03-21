@@ -78,6 +78,7 @@
       <button class="ctb ctb-text" onclick="resetLayout()" title="重置布局">重置</button>
       <button class="ctb ctb-text" onclick="fitView()" title="适应窗口">适应</button>
       <button id="btn-toggle-clk-rst" class="ctb ctb-text" onclick="toggleClockReset()" title="隐藏时钟/复位">时钟</button>
+      <button class="ctb ctb-text" onclick="showShortcutHelp()" title="快捷键说明">说明</button>
     </div>
     <button id="btn-view-ops" class="ctb ctb-text" onclick="toggleViewOpsGroup()" title="画布操作">视图</button>
     <!-- Export group -->
@@ -223,6 +224,9 @@
 
 <!-- Hidden file input for .md comment import -->
 <input type="file" id="comment-file-input" accept=".md,.txt" style="display:none;" onchange="handleCommentFileImport(event)">
+
+<!-- Shortcut Help Modal (content generated dynamically by showShortcutHelp()) -->
+<div id="shortcut-help-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:3000;align-items:center;justify-content:center;" onclick="if(event.target===this)closeShortcutHelp()"></div>
 
 <!-- [Block Design lives at /block-design] -->
 

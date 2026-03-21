@@ -50,19 +50,28 @@ class VerilogInstance:
 
 class VerilogWire:
     """Represents a wire/reg declaration."""
-    def __init__(self, name: str, width: int = 1, msb: int = 0, lsb: int = 0):
+    def __init__(self, name: str, width: int = 1, msb: int = 0, lsb: int = 0,
+                 is_reg: bool = False, arr_msb: int = None, arr_lsb: int = None):
         self.name = name
         self.width = width
         self.msb = msb
         self.lsb = lsb
+        self.is_reg = is_reg
+        self.arr_msb = arr_msb  # array upper bound, e.g. 15 for [0:15]
+        self.arr_lsb = arr_lsb  # array lower bound
 
     def to_dict(self):
-        return {
+        d = {
             'name': self.name,
             'width': self.width,
             'msb': self.msb,
             'lsb': self.lsb,
+            'is_reg': self.is_reg,
         }
+        if self.arr_msb is not None:
+            d['arr_msb'] = self.arr_msb
+            d['arr_lsb'] = self.arr_lsb
+        return d
 
 
 class VerilogModule:
@@ -228,20 +237,31 @@ def parse_verilog_file(filepath: str) -> List[VerilogModule]:
                 module.ports.append(port)
                 existing_port_names.add(port_name)
 
-        # Parse wire/reg declarations
+        # Parse wire/reg declarations (including reg arrays: reg [w:0] name [0:N])
         wire_pattern = re.compile(
-            r'^\s*(?:wire|reg)\s+'
+            r'^\s*(wire|reg)\s+'
             r'(?:signed\s+)?'
             r'(\[\s*\d+\s*:\s*\d+\s*\]\s*)?'
-            r'(\w+)\s*(?:;|=)',
+            r'(\w+)\s*'
+            r'(\[\s*(\d+)\s*:\s*(\d+)\s*\])?\s*'
+            r'(?:;|=)',
             re.MULTILINE
         )
         for wm in wire_pattern.finditer(body_text):
-            width_str = wm.group(1) or ''
-            wire_name = wm.group(2)
+            kw        = wm.group(1)          # 'wire' or 'reg'
+            width_str = wm.group(2) or ''
+            wire_name = wm.group(3)
+            has_arr   = wm.group(4) is not None
+            arr_msb_s = wm.group(5)
+            arr_lsb_s = wm.group(6)
             if wire_name not in existing_port_names:
                 width, msb, lsb = _parse_width(width_str)
-                module.wires.append(VerilogWire(wire_name, width, msb, lsb))
+                arr_msb = int(arr_msb_s) if has_arr else None
+                arr_lsb = int(arr_lsb_s) if has_arr else None
+                module.wires.append(VerilogWire(
+                    wire_name, width, msb, lsb,
+                    is_reg=(kw == 'reg'), arr_msb=arr_msb, arr_lsb=arr_lsb
+                ))
 
         # Parse module instantiations
         # Pattern: ModuleName [#(...)] instance_name ( .port(signal), ... );

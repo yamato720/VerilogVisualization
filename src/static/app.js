@@ -116,6 +116,26 @@ function syncStateToServer(designName) {
     wire_waypoints: state.wireWaypoints?.[designName] || {},
     customizations: state.customizations?.[designName] || { modules: {}, wires: {} },
     tree_expanded: state.treeExpanded?.[designName] ? [...state.treeExpanded[designName]] : [],
+    sidebar_ui: (() => {
+      const sb = $('sidebar');
+      if (!sb) return undefined;
+      return {
+        collapsed:     sb.classList.contains('collapsed'),
+        tree_fullscreen: sb.classList.contains('tree-fullscreen'),
+        width:         sb.dataset.savedWidth || (sb.classList.contains('collapsed') ? null : sb.style.width) || null,
+      };
+    })(),
+    canvas_controls: {
+      wasd_step:      state.canvasControls.wasdStep,
+      zoom_key_in:    state.canvasControls.zoomKeyIn,
+      zoom_key_out:   state.canvasControls.zoomKeyOut,
+      zoom_step_pct:  state.canvasControls.zoomStepPct,
+      help_key:       state.canvasControls.helpKey,
+      fit_key:        state.canvasControls.fitKey,
+      sidebar_key:    state.canvasControls.sidebarKey,
+      tree_full_key:  state.canvasControls.treeFullKey,
+      fullscreen_key: state.canvasControls.fullscreenKey,
+    },
   };
   if (viewState) payload.view_state = viewState;
   fetch('/api/save_state', {
@@ -174,6 +194,18 @@ const state = {
   boxSelectCurrent: null,   // { x, y } in design coords
   // Canvas background color ('transparent' = show default but export transparently)
   canvasBgColor: loadCanvasBgColor(),
+  // Keyboard / interaction controls (persisted per-design in JSON)
+  canvasControls: {
+    wasdStep:    20,   // px per frame for pan/nudge
+    zoomKeyIn:   '[',  // key to zoom in
+    zoomKeyOut:  ']',  // key to zoom out
+    zoomStepPct: 5,    // zoom increment percent per frame
+    helpKey:      'h',  // key to toggle shortcut help modal
+    fitKey:        'y',  // key to fit-to-view
+    sidebarKey:    'c',  // key to collapse/expand sidebar
+    treeFullKey:   'x',  // key to toggle tree fullscreen
+    fullscreenKey: 'z',  // key to toggle app fullscreen
+  },
 };
 
 // ─── DOM helpers ────────────────────────────────────────────────────────
@@ -254,6 +286,7 @@ window.openSettingsPanel = openSettingsPanel;
 window.closeSettingsModal = closeSettingsModal;
 window.applySettings = applySettings;
 window.vvSwitchSettingsTab = vvSwitchSettingsTab;
+window.vvFilterTable = vvFilterTable;
 window.closeCommentPopup = closeCommentPopup;
 window.handleCommentFileImport = handleCommentFileImport;
 window.setCanvasBgColor = setCanvasBgColor;
@@ -414,14 +447,16 @@ function initSidebarResize() {
   const sidebar = $('sidebar');
   if (!handle || !sidebar) return;
 
-  // Capture the natural CSS width as the minimum (do it after layout)
+  // Capture the natural CSS width as the minimum (do it after layout).
+  // Double-rAF ensures layout is fully computed before reading offsetWidth.
   let naturalMinWidth = 0;
-  requestAnimationFrame(() => {
+  requestAnimationFrame(() => requestAnimationFrame(() => {
     naturalMinWidth = sidebar.offsetWidth;
     _updateResizeHandlePos();
-  });
+  }));
 
-  _updateResizeHandlePos();
+  // Also update once the full page load is done (images, fonts, etc.)
+  window.addEventListener('load', _updateResizeHandlePos, { once: true });
 
   let resizing = false;
   let startX = 0;
@@ -851,6 +886,40 @@ async function openDesign(name) {
     // This ensures localStorage positions/waypoints/customizations are written
     // into the JSON even if the user hasn't made any changes since the last sync.
     syncStateToServer(name);
+
+    // Restore sidebar UI state from JSON
+    const sui = data.sidebar_ui;
+    if (sui) {
+      const sb = $('sidebar');
+      if (sb) {
+        // Apply width without transition so handle pos can be read immediately
+        if (sui.width) {
+          sb.classList.add('resizing');   // disables transition
+          sb.style.width    = sui.width;
+          sb.style.minWidth = sui.width;
+          void sb.offsetWidth;            // force reflow
+          sb.classList.remove('resizing');
+        }
+        if (sui.collapsed && !sb.classList.contains('collapsed')) toggleSidebar();
+        else if (!sui.collapsed && sb.classList.contains('collapsed')) toggleSidebar();
+        if (sui.tree_fullscreen !== sb.classList.contains('tree-fullscreen')) toggleTreeFullscreen();
+        _updateResizeHandlePos();
+      }
+    }
+
+    // Restore canvas controls from JSON
+    const cc = data.canvas_controls;
+    if (cc) {
+      if (cc.wasd_step     != null) state.canvasControls.wasdStep    = cc.wasd_step;
+      if (cc.zoom_key_in   != null) state.canvasControls.zoomKeyIn   = cc.zoom_key_in;
+      if (cc.zoom_key_out  != null) state.canvasControls.zoomKeyOut  = cc.zoom_key_out;
+      if (cc.zoom_step_pct != null) state.canvasControls.zoomStepPct = cc.zoom_step_pct;
+      if (cc.help_key      != null) state.canvasControls.helpKey     = cc.help_key;
+      if (cc.fit_key       != null) state.canvasControls.fitKey      = cc.fit_key;
+      if (cc.sidebar_key    != null) state.canvasControls.sidebarKey    = cc.sidebar_key;
+      if (cc.tree_full_key  != null) state.canvasControls.treeFullKey   = cc.tree_full_key;
+      if (cc.fullscreen_key != null) state.canvasControls.fullscreenKey = cc.fullscreen_key;
+    }
 
     showToast(`已加载: ${name}`, 'success');
   } catch (err) {
@@ -1519,13 +1588,16 @@ function renderCanvas() {
       navigateToModuleView(tab.name, modName);
     });
 
-    // Right-click: open settings panel directly
+    // Right-click: show comment popup (if comment exists), otherwise do nothing
     box.addEventListener('contextmenu', e => {
       e.preventDefault();
       e.stopPropagation();
       if (!instName) return;
-      state.settingsTarget = { type: 'module', key: instName, modName };
-      openSettingsPanel();
+      const customs = state.customizations[tab.name] || { modules: {} };
+      const modCustom = customs.modules?.[instName] || {};
+      if (modCustom.comment) {
+        showCommentPopup(instName, modName, modCustom.comment, e.clientX, e.clientY);
+      }
     });
 
     // Click on ⚙ settings icon → open settings panel directly
@@ -2381,8 +2453,270 @@ function initPanZoom() {
     } else if (e.altKey && e.key === 'ArrowUp') {
       e.preventDefault();
       viewHistoryUp();
+    } else if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+               e.key.toLowerCase() === (state.canvasControls.helpKey || 'h').toLowerCase()) {
+      e.preventDefault();
+      const _helpOverlay = $('shortcut-help-overlay');
+      if (_helpOverlay && _helpOverlay.style.display !== 'none') closeShortcutHelp();
+      else showShortcutHelp();
+    } else if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+               e.key.toLowerCase() === (state.canvasControls.fitKey || 'y').toLowerCase()) {
+      e.preventDefault();
+      fitToView();
+    } else if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+               e.key.toLowerCase() === (state.canvasControls.sidebarKey || 'c').toLowerCase()) {
+      e.preventDefault();
+      toggleSidebar();
+    } else if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+               e.key.toLowerCase() === (state.canvasControls.treeFullKey || 'x').toLowerCase()) {
+      e.preventDefault();
+      toggleTreeFullscreen();
+    } else if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+               e.key.toLowerCase() === (state.canvasControls.fullscreenKey || 'z').toLowerCase()) {
+      e.preventDefault();
+      toggleFullscreen();
     }
   });
+
+  // ── WASD pan / nudge  +  configurable zoom keys ─────────────────────
+  const _heldKeys = new Set();
+  let _rafId = null;
+
+  const _tickKeys = () => {
+    if (_heldKeys.size === 0) { _rafId = null; return; }
+    const cc = state.canvasControls;
+    const hasW = _heldKeys.has('w'), hasS = _heldKeys.has('s');
+    const hasA = _heldKeys.has('a'), hasD = _heldKeys.has('d');
+    const keyIn  = (cc.zoomKeyIn  || '[').toLowerCase();
+    const keyOut = (cc.zoomKeyOut || ']').toLowerCase();
+    const hasIn  = _heldKeys.has(keyIn);
+    const hasOut = _heldKeys.has(keyOut);
+    let didSomething = false;
+
+    if (hasIn || hasOut) {
+      const factor = hasIn ? (1 + cc.zoomStepPct / 100) : (1 - cc.zoomStepPct / 100);
+      const container = $('canvas-container');
+      const cx = container ? container.clientWidth / 2 : 0;
+      const cy = container ? container.clientHeight / 2 : 0;
+      const newZoom = Math.max(0.05, Math.min(10, state.zoom * factor));
+      state.pan.x = cx - (cx - state.pan.x) * (newZoom / state.zoom);
+      state.pan.y = cy - (cy - state.pan.y) * (newZoom / state.zoom);
+      state.zoom = newZoom;
+      applyTransform();
+      didSomething = true;
+    }
+
+    const dx = (hasD ? 1 : 0) - (hasA ? 1 : 0);
+    const dy = (hasS ? 1 : 0) - (hasW ? 1 : 0);
+    if (dx !== 0 || dy !== 0) {
+      const step = cc.wasdStep;
+      const sel = state.boxSelection?.items;
+      if (sel && sel.size > 0) {
+        const designName = state.activeTab;
+        if (designName && state.layoutOverrides[designName]) {
+          const svgRoot = getSVGRoot();
+          sel.forEach(instName => {
+            const box = svgRoot?.querySelector(`.module-box[data-instance="${instName}"]`);
+            if (!box) return;
+            const m = box.getAttribute('transform')?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
+            if (!m) return;
+            const ovr = state.layoutOverrides[designName][instName] || {};
+            ovr.x = parseFloat(m[1]) + dx * step - 50;
+            ovr.y = parseFloat(m[2]) + dy * step - 50;
+            state.layoutOverrides[designName][instName] = ovr;
+          });
+          renderCanvas();
+          saveLayout(designName, state.layoutOverrides[designName]);
+        }
+      } else {
+        state.pan.x -= dx * step;
+        state.pan.y -= dy * step;
+        applyTransform();
+        if (state.activeTab) saveViewState(state.activeTab, { pan: { ...state.pan }, zoom: state.zoom });
+      }
+      didSomething = true;
+    }
+
+    if (didSomething || _heldKeys.size > 0) _rafId = requestAnimationFrame(_tickKeys);
+    else _rafId = null;
+  };
+
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    const cc = state.canvasControls;
+    const validKeys = ['w','a','s','d',
+      (cc.zoomKeyIn  || '[').toLowerCase(),
+      (cc.zoomKeyOut || ']').toLowerCase()];
+    if (validKeys.includes(k)) {
+      e.preventDefault();
+      _heldKeys.add(k);
+      if (!_rafId) _rafId = requestAnimationFrame(_tickKeys);
+    }
+  });
+
+  document.addEventListener('keyup', e => {
+    _heldKeys.delete(e.key.toLowerCase());
+  });
+}
+
+function _saveCanvasControls() {
+  if (state.activeTab) scheduleSyncToServer(state.activeTab);
+}
+
+function showShortcutHelp() {
+  const overlay = $('shortcut-help-overlay');
+  if (!overlay) return;
+  const cc = state.canvasControls;
+  const kbdStyle     = 'background:#21262d;border:1px solid #30363d;border-radius:4px;padding:2px 7px;font-family:monospace;font-size:12px;';
+  const thStyle      = 'text-align:left;color:#8b949e;font-weight:500;padding:4px 8px 8px 0;border-bottom:1px solid #30363d;';
+  const th2Style     = 'text-align:left;color:#8b949e;font-weight:500;padding:4px 0 8px 8px;border-bottom:1px solid #30363d;';
+  const tdStyle      = 'padding:6px 8px 6px 0;vertical-align:top;white-space:nowrap;';
+  const td2Style     = 'padding:6px 0 6px 8px;vertical-align:top;';
+  const bindBtnStyle = `${kbdStyle}cursor:pointer;color:#58a6ff;min-width:32px;text-align:center;`;
+  const sectionHead  = txt =>
+    `<div style="color:#6e7681;font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;margin:0 0 8px;">${txt}</div>`;
+  const sliderRow = (idSlider, idNum, min, max, val, unit) =>
+    `<div style="display:flex;align-items:center;gap:6px;margin-top:5px;">
+      <input type="range" id="${idSlider}" min="${min}" max="${max}" value="${val}"
+        style="flex:1;accent-color:#58a6ff;cursor:pointer;">
+      <input type="number" id="${idNum}" min="${min}" max="${max}" value="${val}"
+        style="width:46px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:12px;padding:2px 4px;text-align:center;">
+      ${unit ? `<span style="color:#8b949e;font-size:11px;">${unit}</span>` : ''}
+    </div>`;
+
+  overlay.innerHTML = `
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px 28px;min-width:420px;max-width:540px;color:#c9d1d9;font-size:13px;max-height:90vh;overflow-y:auto;scrollbar-gutter:stable;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+        <h3 style="margin:0;color:#e6edf3;font-size:15px;">⌨ 快捷键说明</h3>
+        <button onclick="closeShortcutHelp()" style="background:none;border:none;color:#8b949e;font-size:18px;cursor:pointer;padding:0 4px;line-height:1;" title="关闭">✕</button>
+      </div>
+      ${sectionHead('⚙ 可自定义按键')}
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+        <tbody>
+          <tr>
+            <td style="${tdStyle}"><kbd style="${kbdStyle}">W A S D</kbd></td>
+            <td style="${td2Style}">移动画布 / 微调选中模块位置
+              ${sliderRow('cc-wasd-slider', 'cc-wasd-num', 5, 40, cc.wasdStep, '速度')}
+            </td>
+          </tr>
+          <tr>
+            <td style="${tdStyle}"><button id="cc-key-in-btn" style="${bindBtnStyle}" title="点击重新绑定">${escHtml(cc.zoomKeyIn)}</button></td>
+            <td style="${td2Style}">放大视图 <span style="color:#484f58;font-size:11px;">（点击按键重新绑定）</span></td>
+          </tr>
+          <tr>
+            <td style="${tdStyle}"><button id="cc-key-out-btn" style="${bindBtnStyle}" title="点击重新绑定">${escHtml(cc.zoomKeyOut)}</button></td>
+            <td style="${td2Style}">缩小视图 <span style="color:#484f58;font-size:11px;">（点击按键重新绑定）</span>
+              ${sliderRow('cc-zoom-slider', 'cc-zoom-num', 3, 10, cc.zoomStepPct, '%/帧')}
+            </td>
+          </tr>
+          <tr>
+            <td style="${tdStyle}"><button id="cc-key-help-btn" style="${bindBtnStyle}" title="点击重新绑定">${escHtml(cc.helpKey)}</button></td>
+            <td style="${td2Style}">打开/关闭快捷键说明 <span style="color:#484f58;font-size:11px;">（点击按键重新绑定）</span></td>
+          </tr>
+          <tr>
+            <td style="${tdStyle}"><button id="cc-key-fit-btn" style="${bindBtnStyle}" title="点击重新绑定">${escHtml(cc.fitKey)}</button></td>
+            <td style="${td2Style}">适应视图 <span style="color:#484f58;font-size:11px;">（点击按键重新绑定）</span></td>
+          </tr>
+          <tr>
+            <td style="${tdStyle}"><button id="cc-key-sidebar-btn" style="${bindBtnStyle}" title="点击重新绑定">${escHtml(cc.sidebarKey)}</button></td>
+            <td style="${td2Style}">收起/展开侧边栏 <span style="color:#484f58;font-size:11px;">（点击按键重新绑定）</span></td>
+          </tr>
+          <tr>
+            <td style="${tdStyle}"><button id="cc-key-treefull-btn" style="${bindBtnStyle}" title="点击重新绑定">${escHtml(cc.treeFullKey)}</button></td>
+            <td style="${td2Style}">模块树全屏/取消全屏 <span style="color:#484f58;font-size:11px;">（点击按键重新绑定）</span></td>
+          </tr>
+          <tr>
+            <td style="${tdStyle}"><button id="cc-key-fullscreen-btn" style="${bindBtnStyle}" title="点击重新绑定">${escHtml(cc.fullscreenKey)}</button></td>
+            <td style="${td2Style}">应用全屏/取消全屏 <span style="color:#484f58;font-size:11px;">（点击按键重新绑定）</span></td>
+          </tr>
+        </tbody>
+      </table>
+      ${sectionHead('📋 快捷键一览')}
+      <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+        <thead><tr><th style="${thStyle}">按键</th><th style="${th2Style}">功能</th></tr></thead>
+        <tbody>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">W A S D</kbd></td><td style="${td2Style}">移动画布 / 微调选中模块位置</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">${escHtml(cc.zoomKeyIn)}</kbd></td><td style="${td2Style}">放大视图</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">${escHtml(cc.zoomKeyOut)}</kbd></td><td style="${td2Style}">缩小视图</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">${escHtml(cc.helpKey)}</kbd></td><td style="${td2Style}">打开/关闭快捷键说明</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">${escHtml(cc.fitKey)}</kbd></td><td style="${td2Style}">适应视图</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">${escHtml(cc.sidebarKey)}</kbd></td><td style="${td2Style}">收起/展开侧边栏</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">${escHtml(cc.treeFullKey)}</kbd></td><td style="${td2Style}">模块树全屏/取消全屏</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">${escHtml(cc.fullscreenKey)}</kbd></td><td style="${td2Style}">应用全屏/取消全屏</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">Ctrl+Z</kbd></td><td style="${td2Style}">撤销</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">Ctrl+Y / Ctrl+Shift+Z</kbd></td><td style="${td2Style}">重做</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">Alt + ← →</kbd></td><td style="${td2Style}">视图历史 前进/后退</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">Alt + ↑</kbd></td><td style="${td2Style}">跳转到上级模块</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">滚轮</kbd></td><td style="${td2Style}">缩放（以鼠标为中心）</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">中键拖拽</kbd></td><td style="${td2Style}">平移画布</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">框选 + 拖拽</kbd></td><td style="${td2Style}">批量选中并移动模块</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">双击模块</kbd></td><td style="${td2Style}">进入子模块视图</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">右键模块</kbd></td><td style="${td2Style}">显示注释（如有）</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">⚙ 图标</kbd></td><td style="${td2Style}">打开模块设置（颜色/注释/端口/寄存器）</td></tr>
+        </tbody>
+      </table>
+      <div style="text-align:right;">
+        <button onclick="closeShortcutHelp()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;padding:6px 16px;cursor:pointer;font-size:13px;">关闭</button>
+      </div>
+    </div>`;
+
+  overlay.style.display = 'flex';
+
+  // ── Bind sliders + number inputs ──
+  const syncPair = (sliderId, numId, min, max, setter) => {
+    const sl = document.getElementById(sliderId);
+    const nm = document.getElementById(numId);
+    if (!sl || !nm) return;
+    const clamp = v => Math.max(min, Math.min(max, v));
+    sl.addEventListener('input', () => { const v = clamp(parseInt(sl.value)); nm.value = v; setter(v); _saveCanvasControls(); });
+    nm.addEventListener('change', () => { const v = clamp(parseInt(nm.value) || min); sl.value = v; nm.value = v; setter(v); _saveCanvasControls(); });
+  };
+  syncPair('cc-wasd-slider', 'cc-wasd-num', 5, 40, v => state.canvasControls.wasdStep    = v);
+  syncPair('cc-zoom-slider', 'cc-zoom-num', 3, 10, v => state.canvasControls.zoomStepPct = v);
+
+  // ── Rebind keys ──
+  const makeRebindBtn = (btnId, which) => {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      btn.textContent = '…';
+      btn.style.color = '#f0883e';
+      const handler = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        const key = e.key;
+        if (key === 'Escape') { btn.textContent = escHtml(state.canvasControls[which]); btn.style.color = '#58a6ff'; }
+        else {
+          state.canvasControls[which] = key;
+          btn.textContent = escHtml(key);
+          btn.style.color = '#58a6ff';
+          _saveCanvasControls();
+        }
+        document.removeEventListener('keydown', handler, true);
+      };
+      document.addEventListener('keydown', handler, true);
+    });
+  };
+  makeRebindBtn('cc-key-in-btn',      'zoomKeyIn');
+  makeRebindBtn('cc-key-out-btn',     'zoomKeyOut');
+  makeRebindBtn('cc-key-help-btn',    'helpKey');
+  makeRebindBtn('cc-key-fit-btn',     'fitKey');
+  makeRebindBtn('cc-key-sidebar-btn',    'sidebarKey');
+  makeRebindBtn('cc-key-treefull-btn',   'treeFullKey');
+  makeRebindBtn('cc-key-fullscreen-btn', 'fullscreenKey');
+}
+window.showShortcutHelp = showShortcutHelp;
+
+function closeShortcutHelp() {
+  const overlay = $('shortcut-help-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+window.closeShortcutHelp = closeShortcutHelp;
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 function applyTransform() {
@@ -2510,32 +2844,152 @@ function openSettingsPanel() {
     const inPorts = mod?.ports?.filter(p => p.direction === 'input') || [];
     const outPorts = mod?.ports?.filter(p => p.direction === 'output') || [];
 
+    // Helper: copy-to-clipboard button for port/reg names
+    // Helper: copy-to-clipboard button — text label with checkmark feedback
+    const copyBtn = (name) =>
+      `<button onclick="navigator.clipboard.writeText('${name}');const b=this;b.textContent='✓';b.style.color='#3fb950';setTimeout(()=>{b.textContent='复制';b.style.color='#484f58'},1500);"
+        style="background:none;border:1px solid #30363d;cursor:pointer;color:#484f58;font-size:10px;padding:1px 5px;border-radius:3px;display:inline-block;line-height:1.4;white-space:nowrap;min-width:28px;"
+        onmouseover="this.style.borderColor='#8b949e';this.style.color='#c9d1d9'" onmouseout="this.style.borderColor='#30363d';this.style.color='#484f58'">复制</button>`;
+
+    // Numeric-suffix grouping helper shared by port and register builders
+    const numSuffixRe = /^(.+?)_(\d+)$/;
+    const groupByNumSuffix = (items, nameKey) => {
+      const groups = {};
+      const ungrouped = [];
+      for (const item of items) {
+        const m = numSuffixRe.exec(item[nameKey]);
+        if (m) {
+          const prefix = m[1];
+          if (!groups[prefix]) groups[prefix] = [];
+          groups[prefix].push(item);
+        } else {
+          ungrouped.push(item);
+        }
+      }
+      // Singletons fall back to ungrouped
+      for (const [, v] of Object.entries(groups)) {
+        if (v.length < 2) ungrouped.push(v[0]);
+      }
+      const groupEntries = Object.entries(groups).filter(([, v]) => v.length >= 2);
+      return { ungrouped, groupEntries };
+    };
+
     // Build port info HTML (shown on 端口 tab)
+    const buildPortSection = (ports, sectionColor, sectionLabel) => {
+      if (!ports.length) return '';
+      const { ungrouped, groupEntries } = groupByNumSuffix(ports, 'name');
+
+      const portRow = (p) => {
+        const bitW = p.width > 1 ? `[${p.msb ?? p.width - 1}:${p.lsb ?? 0}]` : '1\u00a0bit';
+        return `<tr>
+          <td style="color:#c9d1d9;font-family:monospace;font-size:11px;padding:2px 4px 2px 0;white-space:nowrap;">${p.name}</td>
+          <td style="width:36px;text-align:center;padding:0 2px;">${copyBtn(p.name)}</td>
+          <td style="color:#8b949e;font-size:11px;padding:2px 0 2px 4px;white-space:nowrap;text-align:right;">${bitW}</td>
+        </tr>`;
+      };
+
+      const portGroupBlock = (groupName, items) => {
+        const p0 = items[0];
+        const bitW = p0.width > 1 ? `[${p0.msb ?? p0.width - 1}:${p0.lsb ?? 0}]` : '1\u00a0bit';
+        const uid = 'pgrp_' + CSS.escape(groupName);
+        return `<tr class="reg-group-row" data-group="${groupName}">
+            <td colspan="3" style="padding:2px 0;">
+              <span onclick="const b=document.getElementById('${uid}');const open=b.style.display==='none';b.style.display=open?'':'none';this.textContent=open?'▼':'▶';"
+                    style="cursor:pointer;color:#58a6ff;font-family:monospace;font-size:11px;user-select:none;">▶</span>
+              <span style="color:#c9d1d9;font-family:monospace;font-size:11px;padding-left:4px;">${groupName}</span>
+              <span style="color:#484f58;font-size:10px;padding-left:6px;">${items.length}\u00a0个</span>
+              <span style="color:#8b949e;font-size:11px;padding-left:6px;">${bitW}</span>
+              ${copyBtn(groupName)}
+            </td>
+          </tr>
+          <tbody id="${uid}" style="display:none;">
+            ${items.map(portRow).join('')}
+          </tbody>`;
+      };
+
+      let rows = ungrouped.map(portRow).join('');
+      for (const [gname, items] of groupEntries) rows += portGroupBlock(gname, items);
+
+      return `<div style="margin-bottom:8px;">
+        <span style="color:${sectionColor};font-size:11px;font-weight:600;">${sectionLabel} (${ports.length})</span>
+        <table style="margin-top:4px;width:100%;border-collapse:collapse;">${rows}</table>
+      </div>`;
+    };
+
     let portInfoHtml = '';
     if (inPorts.length || outPorts.length) {
-      const portRow = (p) => {
-        const w = p.width > 1 ? `[${(p.msb !== undefined ? p.msb : p.width - 1)}:${p.lsb !== undefined ? p.lsb : 0}]` : '';
-        return `<tr><td style="color:#c9d1d9;font-family:monospace;font-size:11px;padding:2px 8px 2px 0;">${p.name}</td><td style="color:#8b949e;font-size:11px;padding:2px 0;">${w || '1 bit'}</td></tr>`;
-      };
-      if (inPorts.length) {
-        portInfoHtml += `<div style="margin-bottom:10px;"><span style="color:#81c784;font-size:11px;font-weight:600;">⬇ 输入 (${inPorts.length})</span>
-          <table style="margin-top:4px;">${inPorts.map(portRow).join('')}</table></div>`;
-      }
-      if (outPorts.length) {
-        portInfoHtml += `<div><span style="color:#ef5350;font-size:11px;font-weight:600;">⬆ 输出 (${outPorts.length})</span>
-          <table style="margin-top:4px;">${outPorts.map(portRow).join('')}</table></div>`;
-      }
+      portInfoHtml = buildPortSection(inPorts, '#81c784', '⬇ 输入')
+                   + buildPortSection(outPorts, '#ef5350', '⬆ 输出');
     } else {
-      portInfoHtml = `<div style="color:#484f58;font-size:12px;font-style:italic;">无端口信息</div>`;
+      portInfoHtml = `<div style="color:#484f58;font-size:12px;font-style:italic;">此模块没有端口</div>`;
     }
 
     const hasPorts = inPorts.length + outPorts.length > 0;
+
+    // Build register list HTML (shown on 寄存器 tab)
+    const regs = (mod?.wires || []).filter(w => w.is_reg);
+    let regInfoHtml = '';
+    let regGroupCount = 0;
+    if (regs.length) {
+      // Group registers: explicit arr_msb/arr_lsb arrays AND Chisel numeric-suffix groups (foo_0, foo_1 …)
+      const arrRegs = regs.filter(r => r.arr_msb != null);
+      const { ungrouped: chiselUngrouped, groupEntries: chiselGroupEntries } =
+        groupByNumSuffix(regs.filter(r => r.arr_msb == null), 'name');
+      const nonGrouped = chiselUngrouped;
+      // Explicit array regs grouped by name
+      const arrGroups = {};
+      for (const r of arrRegs) {
+        if (!arrGroups[r.name]) arrGroups[r.name] = [];
+        arrGroups[r.name].push(r);
+      }
+      regGroupCount = chiselGroupEntries.length + Object.keys(arrGroups).length;
+
+      const regRow = (r) => {
+        const bitW = r.width > 1 ? `[${r.msb}:${r.lsb}]` : '1\u00a0bit';
+        return `<tr>
+          <td style="color:#c9d1d9;font-family:monospace;font-size:11px;padding:2px 4px 2px 0;white-space:nowrap;">${r.name}</td>
+          <td style="width:36px;text-align:center;padding:0 2px;">${copyBtn(r.name)}</td>
+          <td style="color:#8b949e;font-size:11px;padding:2px 0 2px 4px;white-space:nowrap;text-align:right;">${bitW}</td>
+        </tr>`;
+      };
+
+      const makeGroupBlock = (groupName, items, extraLabel) => {
+        const r0  = items[0];
+        const bitW = r0.width > 1 ? `[${r0.msb}:${r0.lsb}]` : '1\u00a0bit';
+        const uid  = 'arrg_' + CSS.escape(groupName);
+        const detail = extraLabel || `${items.length}\u00a0items`;
+        return `<tr class="reg-group-row" data-group="${groupName}">
+            <td colspan="3" style="padding:2px 0;">
+              <span onclick="const b=document.getElementById('${uid}');const open=b.style.display==='none';b.style.display=open?'':'none';this.textContent=open?'▼':'▶';"
+                    style="cursor:pointer;color:#58a6ff;font-family:monospace;font-size:11px;user-select:none;">▶</span>
+              <span style="color:#c9d1d9;font-family:monospace;font-size:11px;padding-left:4px;">${groupName}</span>
+              <span style="color:#484f58;font-size:10px;padding-left:6px;">${detail}</span>
+              <span style="color:#8b949e;font-size:11px;padding-left:6px;">${bitW}</span>
+              ${copyBtn(groupName)}
+            </td>
+          </tr>
+          <tbody id="${uid}" style="display:none;">
+            ${items.map(r => regRow(r)).join('')}
+          </tbody>`;
+      };
+
+      let rows = nonGrouped.map(regRow).join('');
+      for (const [gname, items] of chiselGroupEntries) rows += makeGroupBlock(gname, items);
+      for (const [gname, items] of Object.entries(arrGroups)) {
+        const r0 = items[0];
+        rows += makeGroupBlock(gname, items, `[${r0.arr_msb}:${r0.arr_lsb}]`);
+      }
+      regInfoHtml = `<table style="width:100%;border-collapse:collapse;">${rows}</table>`;
+    } else {
+      regInfoHtml = `<div style="color:#484f58;font-size:12px;font-style:italic;">此模块没有寄存器</div>`;
+    }
 
     content.innerHTML = `
       <h4 style="color:#c9d1d9;margin-bottom:8px;">模块设置: ${target.key}</h4>
       <div class="bd-cust-tabs" style="margin-bottom:10px;">
         <button class="bd-cust-tab bd-cust-tab-active" onclick="vvSwitchSettingsTab(this,'vv-tab-basic')">基本设置</button>
         <button class="bd-cust-tab" onclick="vvSwitchSettingsTab(this,'vv-tab-ports')">端口信息${hasPorts ? ` (${inPorts.length}/${outPorts.length})` : ''}</button>
+        <button class="bd-cust-tab" onclick="vvSwitchSettingsTab(this,'vv-tab-regs')">寄存器${regs.length ? ` (${regGroupCount ? `${regGroupCount}组/` : ''}${regs.length})` : ''}</button>
       </div>
       <div id="vv-tab-basic" style="display:flex;flex-direction:column;flex:1;min-height:0;">
         <div class="settings-row">
@@ -2559,9 +3013,15 @@ function openSettingsPanel() {
           </div>
         </div>
       </div>
-      <div id="vv-tab-ports" style="display:none;overflow-y:auto;flex:1;padding-top:4px;">
-        <div style="font-size:11px;color:#8b949e;margin-bottom:8px;">模块: ${modName}</div>
+      <div id="vv-tab-ports" style="display:none;overflow-y:auto;flex:1;padding-top:4px;padding-right:8px;">
+        <input type="text" placeholder="搜索端口…" oninput="vvFilterTable(this,'vv-tab-ports')"
+          style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:11px;">
         ${portInfoHtml}
+      </div>
+      <div id="vv-tab-regs" style="display:none;overflow-y:auto;flex:1;padding-top:4px;padding-right:8px;">
+        <input type="text" placeholder="搜索寄存器…" oninput="vvFilterTable(this,'vv-tab-regs')"
+          style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:4px 8px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:11px;">
+        ${regInfoHtml}
       </div>`;
   } else if (target.type === 'wire') {
     const existing = customs.wires?.[target.key] || {};
@@ -2600,11 +3060,51 @@ function vvSwitchSettingsTab(btn, panelId) {
   if (!content) return;
   content.querySelectorAll('.bd-cust-tab').forEach(t => t.classList.remove('bd-cust-tab-active'));
   btn.classList.add('bd-cust-tab-active');
-  ['vv-tab-basic', 'vv-tab-ports'].forEach(id => {
-    const el = content.querySelector('#' + id);
-    if (el) el.style.display = id === panelId ? 'flex' : 'none';
-    // ports tab uses block scroll, not flex
-    if (el && id === panelId && id === 'vv-tab-ports') el.style.display = 'block';
+  content.querySelectorAll('[id^="vv-tab-"]').forEach(el => {
+    const show = el.id === panelId;
+    // basic tab uses flex column; ports/regs tabs are scrollable blocks
+    el.style.display = show ? (el.id === 'vv-tab-basic' ? 'flex' : 'block') : 'none';
+  });
+}
+
+function vvFilterTable(input, panelId) {
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+  const q = input.value.toLowerCase().trim();
+
+  // Handle group rows (collapsible register groups)
+  panel.querySelectorAll('tr.reg-group-row').forEach(groupRow => {
+    const tbody = groupRow.nextElementSibling;
+    if (!tbody || tbody.tagName !== 'TBODY') return;
+    if (!q) {
+      groupRow.style.display = '';
+      tbody.querySelectorAll('tr').forEach(r => { r.style.display = ''; });
+      return;
+    }
+    const groupText = groupRow.textContent.toLowerCase();
+    let anyMatch = groupText.includes(q);
+    tbody.querySelectorAll('tr').forEach(r => {
+      const match = r.textContent.toLowerCase().includes(q);
+      r.style.display = match ? '' : 'none';
+      if (match) anyMatch = true;
+    });
+    groupRow.style.display = anyMatch ? '' : 'none';
+    // Auto-expand the group if any child matches
+    if (anyMatch && tbody.style.display === 'none') tbody.style.display = '';
+  });
+
+  // Handle plain (non-group) rows — skip rows inside group tbodies
+  panel.querySelectorAll('table').forEach(tbl => {
+    tbl.querySelectorAll('tr:not(.reg-group-row)').forEach(tr => {
+      if (tr.closest('tbody') && tr.closest('tbody') !== tr.parentElement) return;
+      // Only process rows directly in a plain <tbody> (not a collapsible one)
+      const parentTbody = tr.parentElement;
+      const isGroupChild = parentTbody && parentTbody.tagName === 'TBODY' &&
+        parentTbody.previousElementSibling &&
+        parentTbody.previousElementSibling.classList.contains('reg-group-row');
+      if (isGroupChild) return; // already handled above
+      tr.style.display = (!q || tr.textContent.toLowerCase().includes(q)) ? '' : 'none';
+    });
   });
 }
 
