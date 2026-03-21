@@ -397,12 +397,14 @@ def build_hierarchy(modules: List[VerilogModule]) -> Dict:
     }
 
 
-def analyze_and_save(source_path: str, data_dir: str) -> Dict:
+def analyze_and_save(source_path: str, data_dir: str, save_name_override: str = None) -> Dict:
     """
     Analyze Verilog source(s) and save result to data directory.
     source_path can be a file or a folder.
     If a single file is given and it references module types not defined in
     that file, search sibling .v/.sv files in the same directory for those definitions.
+    If save_name_override is provided, that name is used as the output filename
+    instead of the name derived from the top module or folder.
     Returns the analysis result dict.
     """
     if os.path.isfile(source_path):
@@ -472,7 +474,9 @@ def analyze_and_save(source_path: str, data_dir: str) -> Dict:
 
     # Determine save name from top module or folder name
     top_modules = result['top_modules']
-    if len(top_modules) == 1:
+    if save_name_override:
+        save_name = save_name_override
+    elif len(top_modules) == 1:
         save_name = top_modules[0]
     else:
         if os.path.isdir(source_path):

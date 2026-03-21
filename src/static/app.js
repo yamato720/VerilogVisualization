@@ -114,7 +114,8 @@ function syncStateToServer(designName) {
     name: designName,
     layout: state.layoutOverrides?.[designName] || {},
     wire_waypoints: state.wireWaypoints?.[designName] || {},
-    customizations: state.customizations?.[designName] || { modules: {}, wires: {} }
+    customizations: state.customizations?.[designName] || { modules: {}, wires: {} },
+    tree_expanded: state.treeExpanded?.[designName] ? [...state.treeExpanded[designName]] : [],
   };
   if (viewState) payload.view_state = viewState;
   fetch('/api/save_state', {
@@ -161,6 +162,11 @@ const state = {
   maxUndoHistory: 50,
   // Guard: set true after drag ends to prevent background click from deselecting
   justFinishedDrag: false,
+  // View navigation history (session-only, not persisted to JSON)
+  viewHistoryBack: [],   // stack of {name, module} — modules visited before current
+  viewHistoryFwd: [],    // stack of {name, module} — modules after current (for redo)
+  // Sidebar tree expansion state (separate from canvas expandedModules)
+  treeExpanded: {},      // designName -> Set(modName)
   // Box selection state
   boxSelection: null,       // { items: Set<instName>, waypoints: [{wireKey, idx}] } or null
   boxSelecting: false,      // true while rubber-band is active
@@ -181,11 +187,13 @@ function getSVGRoot() { return $('svg-root'); }
 
 document.addEventListener('DOMContentLoaded', () => {
   initPanZoom();
+  initTreeKeyboardNav();
+  initSidebarResize();
   loadDesignList();
 
   // Update clock/reset toggle button text on load
   const clkBtn = $('btn-toggle-clk-rst');
-  if (clkBtn) clkBtn.textContent = state.hideClockReset ? '🕐 显示时钟/复位' : '🕐 隐藏时钟/复位';
+  if (clkBtn) clkBtn.title = state.hideClockReset ? '显示时钟/复位' : '隐藏时钟/复位';
 
   // Apply saved canvas background color and sync UI
   applyCanvasBgColor(state.canvasBgColor);
@@ -237,6 +245,9 @@ window.resetLayout = resetLayout;
 window.fitView = () => { state.pan = { x: 0, y: 0 }; state.zoom = 1; fitToView(); };
 window.toggleClockReset = toggleClockReset;
 window.toggleSidebar = toggleSidebar;
+window.toggleTreeFullscreen = toggleTreeFullscreen;
+window.toggleExportGroup = toggleExportGroup;
+window.toggleViewOpsGroup = toggleViewOpsGroup;
 window.toggleFullscreen = toggleFullscreen;
 window.refreshDesign = refreshDesign;
 window.openSettingsPanel = openSettingsPanel;
@@ -298,9 +309,8 @@ function setCanvasBgColor(color) {
 function toggleClockReset() {
   state.hideClockReset = !state.hideClockReset;
   saveHideClockReset(state.hideClockReset);
-  // Update button text
   const btn = $('btn-toggle-clk-rst');
-  if (btn) btn.textContent = state.hideClockReset ? '🕐 显示时钟/复位' : '🕐 隐藏时钟/复位';
+  if (btn) btn.title = state.hideClockReset ? '显示时钟/复位' : '隐藏时钟/复位';
   renderCanvas();
 }
 
@@ -322,8 +332,134 @@ function resetLayout() {
 function toggleSidebar() {
   const sidebar = $('sidebar');
   const expandBtn = $('btn-expand-sidebar');
+  const willCollapse = !sidebar.classList.contains('collapsed');
+  if (willCollapse) {
+    // Inline styles from drag-resize override CSS class rules — clear them first
+    // so that .collapsed { width: 0; min-width: 0 } can take effect.
+    sidebar.dataset.savedWidth = sidebar.style.width;
+    sidebar.dataset.savedMinWidth = sidebar.style.minWidth;
+    sidebar.style.width = '';
+    sidebar.style.minWidth = '';
+  }
   const isCollapsed = sidebar.classList.toggle('collapsed');
+  if (!isCollapsed) {
+    // Restore the custom drag-resized width (if any)
+    if (sidebar.dataset.savedWidth) sidebar.style.width = sidebar.dataset.savedWidth;
+    if (sidebar.dataset.savedMinWidth) sidebar.style.minWidth = sidebar.dataset.savedMinWidth;
+  }
   if (expandBtn) expandBtn.style.display = isCollapsed ? '' : 'none';
+  _updateResizeHandlePos();
+  if (!isCollapsed) {
+    // Sidebar transitions from width:0 — re-position handle after animation ends
+    sidebar.addEventListener('transitionend', function onExpand(e) {
+      if (e.propertyName !== 'width') return;
+      sidebar.removeEventListener('transitionend', onExpand);
+      _updateResizeHandlePos();
+    });
+  }
+}
+
+function toggleExportGroup() {
+  const panel = $('export-expand-panel');
+  if (!panel) return;
+  const nowOpen = panel.style.display === 'none' || panel.style.display === '';
+  panel.style.display = nowOpen ? 'flex' : 'none';
+  const btn = $('btn-export-group');
+  if (btn) btn.classList.toggle('ctb-active', nowOpen);
+}
+
+function toggleViewOpsGroup() {
+  const panel = $('view-ops-panel');
+  if (!panel) return;
+  const nowOpen = panel.style.display === 'none' || panel.style.display === '';
+  panel.style.display = nowOpen ? 'flex' : 'none';
+  const btn = $('btn-view-ops');
+  if (btn) btn.classList.toggle('ctb-active', nowOpen);
+}
+
+function toggleTreeFullscreen() {
+  const sidebar = $('sidebar');
+  const btn = $('btn-tree-fullscreen');
+  if (!sidebar) return;
+
+  const isFullscreen = sidebar.classList.toggle('tree-fullscreen');
+  // Hide/show all sections except module-tree-section
+  ['sidebar-header'].forEach(id => {
+    const el = $(id);
+    if (el) el.style.display = isFullscreen ? 'none' : '';
+  });
+  // sidebar-section elements that are NOT module-tree-section
+  sidebar.querySelectorAll('.sidebar-section:not(#module-tree-section)').forEach(el => {
+    el.style.display = isFullscreen ? 'none' : '';
+  });
+
+  if (btn) { btn.textContent = isFullscreen ? '⊡' : '⛶'; btn.title = isFullscreen ? '恢复' : '全屏'; }
+  _updateResizeHandlePos();
+}
+
+function _updateResizeHandlePos() {
+  const handle = $('sidebar-resize-handle');
+  const sidebar = $('sidebar');
+  if (!handle || !sidebar) return;
+  if (sidebar.classList.contains('collapsed')) {
+    handle.style.display = 'none';
+    return;
+  }
+  handle.style.display = '';
+  handle.style.left = sidebar.offsetWidth + 'px';
+}
+
+function initSidebarResize() {
+  const handle = $('sidebar-resize-handle');
+  const sidebar = $('sidebar');
+  if (!handle || !sidebar) return;
+
+  // Capture the natural CSS width as the minimum (do it after layout)
+  let naturalMinWidth = 0;
+  requestAnimationFrame(() => {
+    naturalMinWidth = sidebar.offsetWidth;
+    _updateResizeHandlePos();
+  });
+
+  _updateResizeHandlePos();
+
+  let resizing = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  handle.addEventListener('mousedown', (e) => {
+    resizing = true;
+    startX = e.clientX;
+    startWidth = sidebar.offsetWidth;
+    handle.classList.add('dragging');
+    sidebar.classList.add('resizing');
+    document.body.style.cursor = 'ew-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!resizing) return;
+    const dx = e.clientX - startX;
+    const minW = naturalMinWidth || 240;
+    const maxW = window.innerWidth - 200;
+    const newW = Math.max(minW, Math.min(maxW, startWidth + dx));
+    sidebar.style.width = newW + 'px';
+    sidebar.style.minWidth = newW + 'px';
+    handle.style.left = newW + 'px';
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!resizing) return;
+    resizing = false;
+    handle.classList.remove('dragging');
+    sidebar.classList.remove('resizing');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+
+  // Keep resize handle aligned when viewport resizes
+  window.addEventListener('resize', () => _updateResizeHandlePos());
 }
 
 function toggleFullscreen() {
@@ -595,9 +731,23 @@ async function openDesign(name) {
       state.expandedModules[name] = new Set();
     }
 
-    // Select first top module to expand
+    // Select first top module to expand (canvas view)
     if (data.top_modules && data.top_modules.length > 0) {
       state.expandedModules[name].add(data.top_modules[0]);
+    }
+
+    // Initialize sidebar tree expansion: load from server JSON, or pre-expand all modules with instances
+    if (!state.treeExpanded[name]) {
+      if (data.tree_expanded && Array.isArray(data.tree_expanded)) {
+        state.treeExpanded[name] = new Set(data.tree_expanded);
+      } else {
+        state.treeExpanded[name] = new Set();
+        for (const [modName, mod] of Object.entries(data.modules)) {
+          if (mod.instances && mod.instances.length > 0) {
+            state.treeExpanded[name].add(modName);
+          }
+        }
+      }
     }
 
     // Load layout: server JSON is the source of truth (always synced on open/change).
@@ -688,7 +838,7 @@ async function openDesign(name) {
 
     // Show sections
     $('module-tree-section').style.display = '';
-    $('export-section').style.display = '';
+    const expSec = $('export-section'); if (expSec) expSec.style.display = '';
     $('welcome-screen').style.display = 'none';
     getSVG().style.display = '';
 
@@ -789,7 +939,7 @@ async function deleteDesign(name) {
       $('welcome-screen').style.display = '';
       getSVG().style.display = 'none';
       $('module-tree-section').style.display = 'none';
-      $('export-section').style.display = 'none';
+      const expSec2 = $('export-section'); if (expSec2) expSec2.style.display = 'none';
     }
     showToast(`已删除: ${name}`, 'success');
   } catch (err) {
@@ -848,6 +998,153 @@ function findParentModule(designName, childModName) {
   return null;
 }
 
+/**
+ * Build the ancestor path from the top module to `targetMod` within a design.
+ * Returns an array [top, ..., parentOfTarget, targetMod], or [targetMod] if no parent.
+ */
+function buildModulePath(designName, targetMod) {
+  const design = state.designs[designName];
+  if (!design) return [targetMod];
+  // Walk up the parent chain
+  const path = [];
+  let cur = targetMod;
+  const visited = new Set();
+  while (cur && !visited.has(cur)) {
+    path.unshift(cur);
+    visited.add(cur);
+    cur = findParentModule(designName, cur);
+  }
+  return path;
+}
+
+/**
+ * Ensure initial layout positions are computed for a module's direct instances.
+ * Only fills in positions for instances not yet in layoutOverrides.
+ */
+function ensureModuleLayout(designName, modName) {
+  const design = state.designs[designName];
+  if (!design) return;
+  if (typeof computeInitialLayout !== 'function') return;
+  const initial = computeInitialLayout(
+    modName, design.modules, state.collapsedState,
+    state.layoutOverrides[designName], state.hideClockReset
+  );
+  let added = false;
+  for (const [key, pos] of Object.entries(initial)) {
+    if (!state.layoutOverrides[designName][key]) {
+      state.layoutOverrides[designName][key] = pos;
+      added = true;
+    }
+  }
+  if (added) saveLayout(designName, state.layoutOverrides[designName]);
+}
+
+/**
+ * Push the current module view to the navigation history stack.
+ * Call this BEFORE changing tab.module.
+ */
+function pushViewHistory(designName, currentModule) {
+  state.viewHistoryBack.push({ name: designName, module: currentModule });
+  state.viewHistoryFwd = []; // new navigation clears forward history
+  updateNavButtons();
+}
+
+/** Navigate to a module view and push the source view to history. */
+function navigateToModuleView(designName, modName) {
+  const tab = state.openTabs.find(t => t.name === designName);
+  if (!tab) return;
+  const prev = tab.module;
+  if (prev === modName) return;
+  pushViewHistory(designName, prev);
+  _gotoModuleView(designName, modName);
+}
+
+/**
+ * Internal: navigate to a module without touching history stacks.
+ * Used by viewHistoryBack / viewHistoryForward.
+ */
+function _gotoModuleView(designName, modName) {
+  const tab = state.openTabs.find(t => t.name === designName);
+  if (!tab) return;
+  tab.module = modName;
+  if (!state.expandedModules[designName]) state.expandedModules[designName] = new Set();
+  state.expandedModules[designName].add(modName);
+  ensureModuleLayout(designName, modName);
+  if (designName !== state.activeTab) {
+    state.activeTab = designName;
+    renderTabs();
+  }
+  renderSidebar(designName);
+  renderCanvas();
+  setTimeout(() => fitToView(), 50);
+}
+
+function viewHistoryBack() {
+  if (!state.viewHistoryBack.length) return;
+  // Save current view to forward stack
+  const tab = state.openTabs.find(t => t.name === state.activeTab);
+  if (tab) state.viewHistoryFwd.push({ name: tab.name, module: tab.module });
+  const entry = state.viewHistoryBack.pop();
+  _gotoModuleView(entry.name, entry.module);
+  updateNavButtons();
+}
+
+function viewHistoryForward() {
+  if (!state.viewHistoryFwd.length) return;
+  // Save current view to back stack
+  const tab = state.openTabs.find(t => t.name === state.activeTab);
+  if (tab) state.viewHistoryBack.push({ name: tab.name, module: tab.module });
+  const entry = state.viewHistoryFwd.pop();
+  _gotoModuleView(entry.name, entry.module);
+  updateNavButtons();
+}
+
+function viewHistoryUp() {
+  if (!state.activeTab) return;
+  const tab = state.openTabs.find(t => t.name === state.activeTab);
+  if (!tab) return;
+  const parent = findParentModule(state.activeTab, tab.module);
+  if (!parent) { showToast('已是顶层模块', 'info'); return; }
+  navigateToModuleView(state.activeTab, parent);
+}
+
+/** Update enabled/disabled state of nav buttons. */
+function updateNavButtons() {
+  const navBar = $('view-nav-bar');
+  const btnBack = $('btn-nav-back');
+  const btnFwd = $('btn-nav-fwd');
+  const btnUp = $('btn-nav-up');
+  if (!state.activeTab) {
+    if (navBar) navBar.style.display = 'none';
+    return;
+  }
+  if (navBar) navBar.style.display = '';
+  if (btnBack) btnBack.disabled = state.viewHistoryBack.length === 0;
+  if (btnFwd) btnFwd.disabled = state.viewHistoryFwd.length === 0;
+  if (btnUp) {
+    const tab = state.openTabs.find(t => t.name === state.activeTab);
+    const hasParent = tab ? !!findParentModule(state.activeTab, tab.module) : false;
+    btnUp.disabled = !hasParent;
+  }
+  // Update module breadcrumb
+  updateModuleBreadcrumb();
+}
+
+/** Update the module path breadcrumb (canvas overlay). */
+function updateModuleBreadcrumb() {
+  const el = $('module-breadcrumb');
+  if (!el || !state.activeTab) { if (el) el.textContent = ''; return; }
+  const tab = state.openTabs.find(t => t.name === state.activeTab);
+  if (!tab) { el.textContent = ''; return; }
+  const path = buildModulePath(state.activeTab, tab.module);
+  el.innerHTML = path.map((m, i) => {
+    if (i < path.length - 1) {
+      return `<span class="breadcrumb-link" onclick="navigateToModuleView('${state.activeTab}', '${m}')">${m}</span>`;
+    }
+    return `<span class="breadcrumb-current">${m}</span>`;
+  }).join('<span class="breadcrumb-sep"> › </span>');
+}
+
 function renderSidebar(designName) {
   const tree = $('module-tree');
   tree.innerHTML = '';
@@ -856,6 +1153,17 @@ function renderSidebar(designName) {
 
   const modules = design.modules;
   const topModules = design.top_modules || [];
+
+  // Ensure treeExpanded is initialised for this design
+  if (!state.treeExpanded[designName]) {
+    state.treeExpanded[designName] = new Set();
+    // Pre-expand all modules that have instances
+    for (const [modName, mod] of Object.entries(modules)) {
+      if (mod.instances && mod.instances.length > 0) {
+        state.treeExpanded[designName].add(modName);
+      }
+    }
+  }
 
   // ── Search input ──
   const searchRow = document.createElement('div');
@@ -869,7 +1177,8 @@ function renderSidebar(designName) {
     const query = searchInput.value.trim().toLowerCase();
     tree.querySelectorAll('.tree-node-label').forEach(label => {
       const modName = label.getAttribute('data-mod-name') || '';
-      if (!query || modName.toLowerCase().includes(query)) {
+      const instName = label.getAttribute('data-inst-name') || '';
+      if (!query || modName.toLowerCase().includes(query) || instName.toLowerCase().includes(query)) {
         label.style.display = '';
       } else {
         label.style.display = 'none';
@@ -879,64 +1188,70 @@ function renderSidebar(designName) {
   searchRow.appendChild(searchInput);
   tree.appendChild(searchRow);
 
-  const createNode = (modName, depth) => {
+  // createNode(modName, depth, instName)
+  //   modName  — the module type (used for children lookup, expansion state, canvas navigation)
+  //   depth    — indentation level
+  //   instName — the specific instance name to display (null for top-level type entries)
+  const createNode = (modName, depth, instName = null) => {
     const mod = modules[modName];
     if (!mod) return;
 
     const label = document.createElement('div');
     label.className = 'tree-node-label';
     label.setAttribute('data-mod-name', modName);
+    if (instName) label.setAttribute('data-inst-name', instName);
+    label.setAttribute('tabindex', '0');
     label.style.paddingLeft = (depth * 16 + 4) + 'px';
 
-    const expanded = state.expandedModules[designName]?.has(modName);
+    // Use treeExpanded (sidebar tree state) for showing children
+    const treeExp = state.treeExpanded[designName]?.has(modName);
     const hasChildren = mod.instances && mod.instances.length > 0;
-    const isTop = topModules.includes(modName);
+    const isTop = !instName && topModules.includes(modName);
 
     // Check if this is the active module in the canvas
     const tab = state.openTabs.find(t => t.name === designName);
     const isViewing = tab && tab.module === modName;
     if (isViewing) label.classList.add('selected');
 
+    // Primary label = instName (when sub-instance) or modName (top-level type)
+    const displayName = instName || modName;
+    const typeHint = (instName && instName !== modName)
+      ? `<span class="tree-type-hint">:${modName}</span>` : '';
+
     label.innerHTML = `
-      <span class="icon">${hasChildren ? (expanded ? '▼' : '▶') : '·'}</span>
-      <span style="${isTop ? 'color:#58a6ff;font-weight:600;' : ''}">${modName}</span>
+      <span class="icon">${hasChildren ? (treeExp ? '▼' : '▶') : '·'}</span>
+      <span style="${isTop ? 'color:#58a6ff;font-weight:600;' : ''}">${displayName}</span>
+      ${typeHint}
       <span style="color:#484f58;font-size:11px;margin-left:auto;">${mod.ports?.length || 0}p</span>`;
 
     label.addEventListener('click', () => {
-      // Single click: navigate to the module — if visible, pan to it; if not, enter its view
       const tab2 = state.openTabs.find(t => t.name === designName);
       const svgRoot = getSVGRoot();
-      const boxes = svgRoot.querySelectorAll(`.module-box[data-module="${modName}"]`);
+      // Prefer navigating to specific instance box when instName is known
+      const boxes = instName
+        ? svgRoot.querySelectorAll(`.module-box[data-instance="${instName}"]`)
+        : svgRoot.querySelectorAll(`.module-box[data-module="${modName}"]`);
       if (boxes.length > 0) {
-        // Module is visible in current view: just pan to it
-        navigateToModule(designName, modName);
-      } else if (hasChildren) {
-        // Module has instances: switch to its own internal view
-        if (tab2) tab2.module = modName;
-        if (!state.expandedModules[designName].has(modName)) {
-          state.expandedModules[designName].add(modName);
+        // Visible in current view: pan to it
+        if (instName) {
+          navigateToInstance(designName, instName);
+        } else {
+          navigateToModule(designName, modName);
         }
-        renderSidebar(designName);
-        renderCanvas();
-        setTimeout(() => fitToView(), 50);
+      } else if (hasChildren) {
+        // Navigate into this module's internal view
+        navigateToModuleView(designName, modName);
       } else {
-        // Leaf module (no instances): navigate to the parent that contains it,
-        // then pan/highlight the module instance box within that view
+        // Leaf module: navigate to the parent module's view then highlight instance
         const parentModName = findParentModule(designName, modName);
         if (parentModName && tab2) {
-          tab2.module = parentModName;
-          if (!state.expandedModules[designName].has(parentModName)) {
-            state.expandedModules[designName].add(parentModName);
-          }
-          renderSidebar(designName);
-          renderCanvas();
-          setTimeout(() => navigateToModule(designName, modName), 100);
+          navigateToModuleView(designName, parentModName);
+          setTimeout(() => {
+            if (instName) navigateToInstance(designName, instName);
+            else navigateToModule(designName, modName);
+          }, 100);
         } else if (modules[modName]) {
-          // Fallback: no parent found (it's already a top-level module), just open it
-          if (tab2) tab2.module = modName;
-          renderSidebar(designName);
-          renderCanvas();
-          setTimeout(() => fitToView(), 50);
+          navigateToModuleView(designName, modName);
         }
       }
     });
@@ -944,33 +1259,128 @@ function renderSidebar(designName) {
     if (hasChildren) {
       label.addEventListener('dblclick', (e) => {
         e.preventDefault();
-        // Double click on expandable: toggle expand/collapse in sidebar tree only
-        const exp = state.expandedModules[designName];
-        if (exp.has(modName)) exp.delete(modName);
-        else exp.add(modName);
+        // Double click: toggle sidebar tree expansion for this module type
+        const treeExp2 = state.treeExpanded[designName];
+        if (treeExp2.has(modName)) treeExp2.delete(modName);
+        else treeExp2.add(modName);
+        scheduleSyncToServer(designName);
         renderSidebar(designName);
       });
     }
 
     tree.appendChild(label);
 
-    // Children
-    if (expanded && mod.instances) {
-      const seen = new Set();
+    // Children: show ALL instances by instance_name (no type deduplication)
+    // Expansion is still controlled by module type in treeExpanded
+    if (treeExp && mod.instances) {
       mod.instances.forEach(inst => {
-        if (!seen.has(inst.module_type)) {
-          seen.add(inst.module_type);
-          createNode(inst.module_type, depth + 1);
-        }
+        createNode(inst.module_type, depth + 1, inst.instance_name);
       });
     }
   };
 
+  // Top-level modules use type name only (no instName)
   if (topModules.length > 0) {
-    topModules.forEach(t => createNode(t, 0));
+    topModules.forEach(t => createNode(t, 0, null));
   } else {
-    Object.keys(modules).forEach(m => createNode(m, 0));
+    Object.keys(modules).forEach(m => createNode(m, 0, null));
   }
+
+}
+
+// ── One-time keyboard navigation for module tree ──
+// Attached once here instead of inside renderSidebar to prevent stacked listeners.
+function initTreeKeyboardNav() {
+  const tree = $('module-tree');
+  if (!tree) return;
+  tree.addEventListener('keydown', (e) => {
+    const focused = document.activeElement;
+    if (!focused || !focused.classList.contains('tree-node-label')) return;
+
+    const designName = state.activeTab;
+    if (!designName) return;
+    const modules = state.designs[designName]?.modules;
+    if (!modules) return;
+
+    const allLabels = [...tree.querySelectorAll('.tree-node-label')].filter(l => l.style.display !== 'none');
+    const idx = allLabels.indexOf(focused);
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (idx < allLabels.length - 1) allLabels[idx + 1].focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (idx > 0) allLabels[idx - 1].focus();
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      const mod = focused.getAttribute('data-mod-name');
+      if (mod && modules[mod]?.instances?.length > 0) {
+        if (!state.treeExpanded[designName].has(mod)) {
+          state.treeExpanded[designName].add(mod);
+          scheduleSyncToServer(designName);
+          renderSidebar(designName);
+          const newLabel = tree.querySelector(`.tree-node-label[data-mod-name="${mod}"]`);
+          if (newLabel) newLabel.focus();
+        }
+      }
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const mod = focused.getAttribute('data-mod-name');
+      if (mod && state.treeExpanded[designName].has(mod)) {
+        state.treeExpanded[designName].delete(mod);
+        scheduleSyncToServer(designName);
+        renderSidebar(designName);
+        const newLabel = tree.querySelector(`.tree-node-label[data-mod-name="${mod}"]`);
+        if (newLabel) newLabel.focus();
+      } else {
+        const parentMod = findParentModule(designName, mod);
+        if (parentMod) {
+          const parentLabel = tree.querySelector(`.tree-node-label[data-mod-name="${parentMod}"]`);
+          if (parentLabel) parentLabel.focus();
+        }
+      }
+    } else if (e.key === 'Enter') {
+      focused.click();
+    }
+  });
+}
+
+/**
+ * Navigate to a specific INSTANCE box in the canvas by instance name.
+ */
+function navigateToInstance(designName, instName) {
+  const svgRoot = getSVGRoot();
+  const box = svgRoot.querySelector(`.module-box[data-instance="${instName}"]`);
+  if (!box) {
+    showToast(`实例 "${instName}" 在当前视图中不可见`, 'warn');
+    return;
+  }
+  const transform = box.getAttribute('transform');
+  const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
+  if (!match) return;
+  const modX = parseFloat(match[1]);
+  const modY = parseFloat(match[2]);
+  const rect = box.querySelector('.module-rect');
+  const modW = rect ? parseFloat(rect.getAttribute('width')) : 150;
+  const modH = rect ? parseFloat(rect.getAttribute('height')) : 100;
+  const centerX = modX + modW / 2;
+  const centerY = modY + modH / 2;
+  const container = $('canvas-container');
+  const cw = container.clientWidth;
+  const ch = container.clientHeight;
+  const targetZoom = Math.min(Math.max(state.zoom, 0.5), 2);
+  state.zoom = targetZoom;
+  state.pan.x = cw / 2 - centerX * state.zoom;
+  state.pan.y = ch / 2 - centerY * state.zoom;
+  applyTransform();
+  if (state.activeTab) saveViewState(state.activeTab, { pan: { ...state.pan }, zoom: state.zoom });
+  box.classList.add('highlighted');
+  box.style.transition = 'filter 0.3s';
+  box.style.filter = 'brightness(1.5) drop-shadow(0 0 10px #ffeb3b)';
+  setTimeout(() => {
+    box.style.filter = '';
+    setTimeout(() => { box.classList.remove('highlighted'); box.style.transition = ''; }, 2000);
+  }, 500);
 }
 
 /**
@@ -1093,17 +1503,20 @@ function renderCanvas() {
   // Apply current transform
   applyTransform();
 
+  // Update navigation buttons and breadcrumb
+  updateNavButtons();
+
   // ── Attach click handlers for expanding/collapsing modules ──
   svgRoot.querySelectorAll('.module-box').forEach(box => {
     const modName = box.getAttribute('data-module');
     const instName = box.getAttribute('data-instance');
 
-    // Double-click to expand/collapse module internals
+    // Double-click on a sub-module box: navigate INTO that module's internal view
     box.addEventListener('dblclick', e => {
       e.stopPropagation();
-      if (expanded.has(modName)) expanded.delete(modName);
-      else expanded.add(modName);
-      renderCanvas();
+      if (!instName) return; // top-level bounding box, no instance
+      if (!modName || !modules[modName]?.instances?.length) return; // leaf module
+      navigateToModuleView(tab.name, modName);
     });
 
     // Right-click: open settings panel directly
@@ -1885,6 +2298,7 @@ function initPanZoom() {
     if (state.editMode === 'resize-module') { onModuleResizeMove(e); return; }
     if (state.editMode === 'drag-waypoint') { onWaypointDragMove(e); return; }
     if (state.editMode === 'drag-box-selection') { onBoxSelectionDragMove(e); return; }
+    if (state.editMode === 'resize-box-selection') { onBoxSelectionResizeMove(e); return; }
     // Box selecting (rubber-band)
     if (state.boxSelecting) {
       const pt = svgToDesignCoords(e.clientX, e.clientY);
@@ -1907,6 +2321,7 @@ function initPanZoom() {
     if (state.editMode === 'resize-module') { onModuleResizeEnd(e); return; }
     if (state.editMode === 'drag-waypoint') { onWaypointDragEnd(e); return; }
     if (state.editMode === 'drag-box-selection') { onBoxSelectionDragEnd(e); return; }
+    if (state.editMode === 'resize-box-selection') { onBoxSelectionResizeEnd(e); return; }
     // Box selection end
     if (state.boxSelecting) {
       finalizeBoxSelection();
@@ -1957,6 +2372,15 @@ function initPanZoom() {
     } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'Z') {
       e.preventDefault();
       doRedo();
+    } else if (e.altKey && e.key === 'ArrowLeft') {
+      e.preventDefault();
+      viewHistoryBack();
+    } else if (e.altKey && e.key === 'ArrowRight') {
+      e.preventDefault();
+      viewHistoryForward();
+    } else if (e.altKey && e.key === 'ArrowUp') {
+      e.preventDefault();
+      viewHistoryUp();
     }
   });
 }
@@ -2554,7 +2978,27 @@ function finalizeBoxSelection() {
     return;
   }
 
-  state.boxSelection = { items: selectedModules, waypoints: selectedWaypoints };
+  // Snapshot current layout state so cancel can fully revert
+  const designName = state.activeTab;
+  const snapLayoutOverrides = {};
+  selectedModules.forEach(instName => {
+    const ovr = state.layoutOverrides[designName]?.[instName];
+    snapLayoutOverrides[instName] = ovr ? { ...ovr } : null;
+  });
+  const snapWireWaypoints = {};
+  selectedWaypoints.forEach(wpRef => {
+    const wps = state.wireWaypoints[designName]?.[wpRef.wireKey];
+    if (wps?.[wpRef.idx]) {
+      snapWireWaypoints[`${wpRef.wireKey}:${wpRef.idx}`] = { x: wps[wpRef.idx].x, y: wps[wpRef.idx].y, wireKey: wpRef.wireKey, idx: wpRef.idx };
+    }
+  });
+  state.boxSelection = {
+    items: selectedModules,
+    waypoints: selectedWaypoints,
+    queryRect: { x1: selX1, y1: selY1, x2: selX2, y2: selY2 },
+    snapLayoutOverrides,
+    snapWireWaypoints,
+  };
   renderBoxSelectionHighlight();
 }
 
@@ -2583,91 +3027,32 @@ function renderBoxSelectionHighlight() {
     }
   });
 
-  // Add close button overlay
+  // Add close button and resize handles overlay
   removeBoxSelectionCloseBtn();
   const designRoot = getSVGRoot().querySelector('#design-root');
   if (!designRoot) return;
 
-  // Find bounding box of selected items
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  svgRoot.querySelectorAll('.module-box.box-selected').forEach(box => {
-    const transform = box.getAttribute('transform');
-    const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
-    if (!match) return;
-    const mx = parseFloat(match[1]);
-    const my = parseFloat(match[2]);
-    const mRect = box.querySelector('.module-rect');
-    const mw = mRect ? parseFloat(mRect.getAttribute('width')) : 150;
-    const mh = mRect ? parseFloat(mRect.getAttribute('height')) : 100;
-    minX = Math.min(minX, mx);
-    minY = Math.min(minY, my);
-    maxX = Math.max(maxX, mx + mw);
-    maxY = Math.max(maxY, my + mh);
-  });
-
-  state.boxSelection.waypoints.forEach(wpRef => {
-    const wps = state.wireWaypoints[state.activeTab]?.[wpRef.wireKey];
-    if (wps?.[wpRef.idx]) {
-      const wp = wps[wpRef.idx];
-      minX = Math.min(minX, wp.x - 10);
-      minY = Math.min(minY, wp.y - 10);
-      maxX = Math.max(maxX, wp.x + 10);
-      maxY = Math.max(maxY, wp.y + 10);
-    }
-  });
-
-  if (minX === Infinity) return;
+  // Use the stored queryRect as the selection area boundary
+  const qr = state.boxSelection.queryRect;
+  if (!qr) return;
+  const pad = 10;
+  const bx  = qr.x1 - pad;
+  const by  = qr.y1 - pad;
+  const bx2 = qr.x2 + pad;
+  const by2 = qr.y2 + pad;
 
   // Draw selection bounding box
-  const pad = 10;
   const selBorder = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
   selBorder.id = 'box-selection-border';
-  selBorder.setAttribute('x', minX - pad);
-  selBorder.setAttribute('y', minY - pad);
-  selBorder.setAttribute('width', maxX - minX + pad * 2);
-  selBorder.setAttribute('height', maxY - minY + pad * 2);
+  selBorder.setAttribute('x', bx);
+  selBorder.setAttribute('y', by);
+  selBorder.setAttribute('width', bx2 - bx);
+  selBorder.setAttribute('height', by2 - by);
   selBorder.setAttribute('fill', 'none');
   selBorder.setAttribute('stroke', '#58a6ff');
   selBorder.setAttribute('stroke-width', 2 / state.zoom);
   selBorder.setAttribute('stroke-dasharray', `${6/state.zoom},${3/state.zoom}`);
   selBorder.setAttribute('rx', 4);
-  selBorder.setAttribute('pointer-events', 'none');
-  designRoot.appendChild(selBorder);
-
-  // Close button (X) at top-right of selection box
-  const closeBtnSize = 18 / state.zoom;
-  const closeG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  closeG.id = 'box-selection-close';
-  closeG.style.cursor = 'pointer';
-
-  const closeBg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  closeBg.setAttribute('cx', maxX + pad);
-  closeBg.setAttribute('cy', minY - pad);
-  closeBg.setAttribute('r', closeBtnSize / 2);
-  closeBg.setAttribute('fill', '#da3633');
-  closeBg.setAttribute('stroke', '#0d1117');
-  closeBg.setAttribute('stroke-width', 1.5 / state.zoom);
-  closeG.appendChild(closeBg);
-
-  const closeTxt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-  closeTxt.setAttribute('x', maxX + pad);
-  closeTxt.setAttribute('y', minY - pad + closeBtnSize * 0.15);
-  closeTxt.setAttribute('text-anchor', 'middle');
-  closeTxt.setAttribute('fill', '#fff');
-  closeTxt.setAttribute('font-size', closeBtnSize * 0.7);
-  closeTxt.setAttribute('font-weight', 'bold');
-  closeTxt.setAttribute('pointer-events', 'none');
-  closeTxt.textContent = '✕';
-  closeG.appendChild(closeTxt);
-
-  closeG.addEventListener('click', (e) => {
-    e.stopPropagation();
-    clearBoxSelection();
-  });
-
-  designRoot.appendChild(closeG);
-
-  // Make the selection border draggable for group move
   selBorder.setAttribute('pointer-events', 'all');
   selBorder.style.cursor = 'move';
   selBorder.addEventListener('mousedown', (e) => {
@@ -2676,13 +3061,85 @@ function renderBoxSelectionHighlight() {
     e.preventDefault();
     startBoxSelectionDrag(e);
   });
+  designRoot.appendChild(selBorder);
+
+  // Confirm / Cancel buttons centered above the top border
+  const ccG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  ccG.id = 'box-selection-confirm-cancel';
+  const ccBmx = (bx + bx2) / 2;
+  const ccGap = 14 / state.zoom;
+  const ccBtnW = 26 / state.zoom;
+  const ccBtnH = 22 / state.zoom;
+  const ccSpacing = 6 / state.zoom;
+  const ccBtnRx = 4 / state.zoom;
+  const ccFontSize = 13 / state.zoom;
+  const ccBtnTop = by - ccGap - ccBtnH;
+
+  function _makeCCBtn(x, color, label, onClick) {
+    const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    r.setAttribute('x', x); r.setAttribute('y', ccBtnTop);
+    r.setAttribute('width', ccBtnW); r.setAttribute('height', ccBtnH);
+    r.setAttribute('fill', color); r.setAttribute('stroke', '#0d1117');
+    r.setAttribute('stroke-width', 1 / state.zoom); r.setAttribute('rx', ccBtnRx);
+    r.style.cursor = 'pointer';
+    r.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', x + ccBtnW / 2); t.setAttribute('y', ccBtnTop + ccBtnH * 0.68);
+    t.setAttribute('text-anchor', 'middle'); t.setAttribute('fill', '#fff');
+    t.setAttribute('font-size', ccFontSize); t.setAttribute('pointer-events', 'none');
+    t.textContent = label;
+    ccG.appendChild(r); ccG.appendChild(t);
+  }
+  _makeCCBtn(ccBmx - ccSpacing / 2 - ccBtnW, '#2ea44f', '✓', confirmBoxSelection);
+  _makeCCBtn(ccBmx + ccSpacing / 2,           '#da3633', '✕', cancelBoxSelection);
+  designRoot.appendChild(ccG);
+
+  // Resize handles — 8 around the border (corners + edge midpoints)
+  const handlesG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  handlesG.id = 'box-selection-handles';
+  const bmx = (bx + bx2) / 2;
+  const bmy = (by + by2) / 2;
+  const hs = 5 / state.zoom; // half-size of handle square
+  const handleDefs = [
+    { role: 'nw', x: bx,  y: by,  cursor: 'nw-resize' },
+    { role: 'n',  x: bmx, y: by,  cursor: 'n-resize'  },
+    { role: 'ne', x: bx2, y: by,  cursor: 'ne-resize' },
+    { role: 'e',  x: bx2, y: bmy, cursor: 'e-resize'  },
+    { role: 'se', x: bx2, y: by2, cursor: 'se-resize' },
+    { role: 's',  x: bmx, y: by2, cursor: 's-resize'  },
+    { role: 'sw', x: bx,  y: by2, cursor: 'sw-resize' },
+    { role: 'w',  x: bx,  y: bmy, cursor: 'w-resize'  },
+  ];
+  for (const h of handleDefs) {
+    const hr = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    hr.setAttribute('data-role', h.role);
+    hr.setAttribute('x', h.x - hs);
+    hr.setAttribute('y', h.y - hs);
+    hr.setAttribute('width', hs * 2);
+    hr.setAttribute('height', hs * 2);
+    hr.setAttribute('fill', '#58a6ff');
+    hr.setAttribute('stroke', '#0d1117');
+    hr.setAttribute('stroke-width', 1 / state.zoom);
+    hr.setAttribute('rx', 1 / state.zoom);
+    hr.style.cursor = h.cursor;
+    hr.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      startBoxSelectionResize(e, h.role);
+    });
+    handlesG.appendChild(hr);
+  }
+  designRoot.appendChild(handlesG);
 }
 
 function removeBoxSelectionCloseBtn() {
   const border = document.getElementById('box-selection-border');
   if (border) border.remove();
-  const closeBtn = document.getElementById('box-selection-close');
-  if (closeBtn) closeBtn.remove();
+  const ccBtns = document.getElementById('box-selection-confirm-cancel');
+  if (ccBtns) ccBtns.remove();
+  const handles = document.getElementById('box-selection-handles');
+  if (handles) handles.remove();
 }
 
 function clearBoxSelection() {
@@ -2729,6 +3186,141 @@ function startBoxSelectionDrag(e) {
   $('canvas-container').style.cursor = 'move';
 }
 
+function startBoxSelectionResize(e, role) {
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  if (!pt || !state.boxSelection?.queryRect) return;
+  state.editMode = 'resize-box-selection';
+  state.editTarget = {
+    handle: role,
+    startPt: { x: pt.x, y: pt.y },
+    origRect: { ...state.boxSelection.queryRect },
+  };
+  // mirror cursor from the handle element
+  $('canvas-container').style.cursor = e.currentTarget?.style?.cursor || 'crosshair';
+}
+
+function _computeResizedRect(origRect, handle, dx, dy) {
+  let { x1, y1, x2, y2 } = origRect;
+  if (handle.includes('w')) x1 += dx;
+  if (handle.includes('e')) x2 += dx;
+  if (handle.includes('n')) y1 += dy;
+  if (handle.includes('s')) y2 += dy;
+  return { x1: Math.min(x1, x2), y1: Math.min(y1, y2), x2: Math.max(x1, x2), y2: Math.max(y1, y2) };
+}
+
+function _updateResizeBorderVisual(x1, y1, x2, y2) {
+  const pad = 10;
+  const bx = x1 - pad, by = y1 - pad, bx2 = x2 + pad, by2 = y2 + pad;
+  const border = document.getElementById('box-selection-border');
+  if (border) {
+    border.setAttribute('x', bx);
+    border.setAttribute('y', by);
+    border.setAttribute('width', bx2 - bx);
+    border.setAttribute('height', by2 - by);
+  }
+  // Update handle positions
+  const handlesG = document.getElementById('box-selection-handles');
+  if (handlesG) {
+    const hs = 5 / state.zoom;
+    const bmxH = (bx + bx2) / 2, bmyH = (by + by2) / 2;
+    const positions = {
+      nw: { x: bx,   y: by   }, n: { x: bmxH, y: by   }, ne: { x: bx2, y: by   },
+      e:  { x: bx2,  y: bmyH }, se: { x: bx2,  y: by2  }, s:  { x: bmxH, y: by2  },
+      sw: { x: bx,   y: by2  }, w:  { x: bx,   y: bmyH },
+    };
+    for (const hr of handlesG.querySelectorAll('rect')) {
+      const pos = positions[hr.getAttribute('data-role')];
+      if (pos) { hr.setAttribute('x', pos.x - hs); hr.setAttribute('y', pos.y - hs); }
+    }
+  }
+  // Update confirm/cancel buttons
+  const ccG = document.getElementById('box-selection-confirm-cancel');
+  if (ccG) {
+    const newBmx = (bx + bx2) / 2;
+    const gap = 14 / state.zoom, btnW = 26 / state.zoom, btnH = 22 / state.zoom, sp = 6 / state.zoom;
+    const btnTop = by - gap - btnH;
+    const rects = ccG.querySelectorAll('rect');
+    const texts = ccG.querySelectorAll('text');
+    if (rects[0]) { rects[0].setAttribute('x', newBmx - sp / 2 - btnW); rects[0].setAttribute('y', btnTop); }
+    if (rects[1]) { rects[1].setAttribute('x', newBmx + sp / 2);         rects[1].setAttribute('y', btnTop); }
+    if (texts[0]) { texts[0].setAttribute('x', newBmx - sp / 2 - btnW / 2); texts[0].setAttribute('y', btnTop + btnH * 0.68); }
+    if (texts[1]) { texts[1].setAttribute('x', newBmx + sp / 2 + btnW / 2); texts[1].setAttribute('y', btnTop + btnH * 0.68); }
+  }
+}
+
+function onBoxSelectionResizeMove(e) {
+  const t = state.editTarget;
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  if (!pt || !t) return;
+  const dx = pt.x - t.startPt.x;
+  const dy = pt.y - t.startPt.y;
+  const nr = _computeResizedRect(t.origRect, t.handle, dx, dy);
+  _updateResizeBorderVisual(nr.x1, nr.y1, nr.x2, nr.y2);
+}
+
+function onBoxSelectionResizeEnd(e) {
+  const t = state.editTarget;
+  if (!t) return;
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  let newRect = { ...t.origRect };
+  if (pt) {
+    const dx = pt.x - t.startPt.x;
+    const dy = pt.y - t.startPt.y;
+    newRect = _computeResizedRect(t.origRect, t.handle, dx, dy);
+  }
+  state.editMode = null;
+  state.editTarget = null;
+  $('canvas-container').style.cursor = 'grab';
+  reapplyBoxSelection(newRect);
+}
+
+function reapplyBoxSelection(queryRect) {
+  const { x1: selX1, y1: selY1, x2: selX2, y2: selY2 } = queryRect;
+  const selectedModules = new Set();
+  const selectedWaypoints = [];
+  const svgRoot = getSVGRoot();
+
+  svgRoot.querySelectorAll('.module-box').forEach(box => {
+    const instName = box.getAttribute('data-instance');
+    if (!instName) return;
+    const transform = box.getAttribute('transform');
+    const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
+    if (!match) return;
+    const mx = parseFloat(match[1]);
+    const my = parseFloat(match[2]);
+    const mRect = box.querySelector('.module-rect');
+    const mw = mRect ? parseFloat(mRect.getAttribute('width')) : 150;
+    const mh = mRect ? parseFloat(mRect.getAttribute('height')) : 100;
+    const cx = mx + mw / 2;
+    const cy = my + mh / 2;
+    if (cx >= selX1 && cx <= selX2 && cy >= selY1 && cy <= selY2) {
+      selectedModules.add(instName);
+    }
+  });
+
+  svgRoot.querySelectorAll('.wire-waypoint').forEach(wp => {
+    const wxc = parseFloat(wp.getAttribute('cx'));
+    const wyc = parseFloat(wp.getAttribute('cy'));
+    if (wxc >= selX1 && wxc <= selX2 && wyc >= selY1 && wyc <= selY2) {
+      selectedWaypoints.push({
+        wireKey: wp.getAttribute('data-wire-key'),
+        idx: parseInt(wp.getAttribute('data-wp-index')),
+      });
+    }
+  });
+
+  // Preserve cancel snapshot from the original selection (not from resize changes)
+  const prevSnap = state.boxSelection;
+  state.boxSelection = {
+    items: selectedModules,
+    waypoints: selectedWaypoints,
+    queryRect,
+    snapLayoutOverrides: prevSnap?.snapLayoutOverrides || {},
+    snapWireWaypoints:   prevSnap?.snapWireWaypoints   || {},
+  };
+  renderBoxSelectionHighlight();
+}
+
 function onBoxSelectionDragMove(e) {
   const t = state.editTarget;
   const pt = svgToDesignCoords(e.clientX, e.clientY);
@@ -2748,6 +3340,11 @@ function onBoxSelectionDragMove(e) {
       wp.setAttribute('cx', orig.x + dx);
       wp.setAttribute('cy', orig.y + dy);
     }
+  }
+  // Move the selection border / handles / buttons overlay in real time
+  if (state.boxSelection?.queryRect) {
+    const qr = state.boxSelection.queryRect;
+    _updateResizeBorderVisual(qr.x1 + dx, qr.y1 + dy, qr.x2 + dx, qr.y2 + dy);
   }
 }
 
@@ -2779,6 +3376,12 @@ function onBoxSelectionDragEnd(e) {
       }
     }
     saveWireWaypoints(designName, state.wireWaypoints[designName]);
+
+    // Update queryRect to follow moved items before canvas re-renders
+    if (state.boxSelection) {
+      const qr = state.boxSelection.queryRect;
+      state.boxSelection.queryRect = { x1: qr.x1 + dx, y1: qr.y1 + dy, x2: qr.x2 + dx, y2: qr.y2 + dy };
+    }
   }
 
   state.editMode = null;
@@ -2789,6 +3392,38 @@ function onBoxSelectionDragEnd(e) {
   renderCanvas();
   // Re-highlight selection after re-render
   setTimeout(() => renderBoxSelectionHighlight(), 50);
+}
+
+function confirmBoxSelection() {
+  clearBoxSelection();
+}
+
+function cancelBoxSelection() {
+  if (!state.boxSelection) return;
+  const { snapLayoutOverrides, snapWireWaypoints } = state.boxSelection;
+  const designName = state.activeTab;
+  if (snapLayoutOverrides && Object.keys(snapLayoutOverrides).length > 0) {
+    pushUndoSnapshot();
+    if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
+    for (const [instName, savedOvr] of Object.entries(snapLayoutOverrides)) {
+      if (savedOvr !== null) {
+        state.layoutOverrides[designName][instName] = { ...savedOvr };
+      } else {
+        delete state.layoutOverrides[designName][instName];
+      }
+    }
+    saveLayout(designName, state.layoutOverrides[designName]);
+  }
+  if (snapWireWaypoints) {
+    for (const [, wpSnap] of Object.entries(snapWireWaypoints)) {
+      if (state.wireWaypoints[designName]?.[wpSnap.wireKey]) {
+        state.wireWaypoints[designName][wpSnap.wireKey][wpSnap.idx] = { x: wpSnap.x, y: wpSnap.y };
+      }
+    }
+    saveWireWaypoints(designName, state.wireWaypoints[designName]);
+  }
+  clearBoxSelection();
+  renderCanvas();
 }
 
 // ─── Export ─────────────────────────────────────────────────────────────

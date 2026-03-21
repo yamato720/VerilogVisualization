@@ -57,41 +57,53 @@
 
   <!-- Module Tree -->
   <div class="sidebar-section" id="module-tree-section" style="display:none;">
-    <h3>模块层次</h3>
+    <div class="sidebar-section-header">
+      <h3 style="margin-bottom:0;">模块层次</h3>
+      <button id="btn-tree-fullscreen" class="tree-section-btn" onclick="toggleTreeFullscreen()" title="全屏">⛶</button>
+    </div>
     <div id="module-tree"></div>
   </div>
 
-  <!-- Export -->
-  <div class="sidebar-section" id="export-section" style="display:none;">
-    <h3>导出</h3>
-    <div class="export-buttons">
-      <button onclick="exportSVG()">📐 SVG</button>
-      <button onclick="exportPNG()">🖼️ PNG</button>
-      <button onclick="exportHTML()">🌐 HTML</button>
-    </div>
-    <div class="export-buttons" style="margin-top:6px;">
-      <button onclick="resetLayout()" title="重置所有模块位置和线路编辑">🔄 重置布局</button>
-      <button onclick="fitView()" title="适应窗口">📐 适应窗口</button>
-    </div>
-    <div class="export-buttons" style="margin-top:6px;">
-      <button id="btn-toggle-clk-rst" onclick="toggleClockReset()" title="显示/隐藏时钟和复位信号线">🕐 显示时钟/复位</button>
-    </div>
-  </div>
 </div>
+<div id="sidebar-resize-handle" title="拖动调整宽度"></div>
 
 <!-- Main Content -->
 <div id="main">
-  <!-- Sidebar expand button (visible when sidebar collapsed) -->
-  <button id="btn-expand-sidebar" class="sidebar-expand-btn" onclick="toggleSidebar()" title="展开侧边栏" style="display:none;">▶</button>
-  <!-- Refresh button -->
-  <button id="btn-refresh" class="toolbar-btn refresh-btn" onclick="refreshDesign()" title="刷新设计（重新分析源文件）">🔄</button>
-  <!-- Fullscreen toggle -->
-  <button id="btn-fullscreen" class="toolbar-btn fullscreen-btn" onclick="toggleFullscreen()" title="全屏">⛶</button>
+  <!-- Sidebar expand tab: hangs on left edge when sidebar is collapsed -->
+  <button id="btn-expand-sidebar" onclick="toggleSidebar()" title="展开侧边栏" style="display:none;">▶</button>
+  <!-- Canvas Toolbar: view-ops, export, refresh, fullscreen -->
+  <div id="canvas-toolbar">
+    <!-- View operations group -->
+    <div id="view-ops-panel" class="ctb-expand-panel" style="display:none;">
+      <button class="ctb ctb-text" onclick="resetLayout()" title="重置布局">重置</button>
+      <button class="ctb ctb-text" onclick="fitView()" title="适应窗口">适应</button>
+      <button id="btn-toggle-clk-rst" class="ctb ctb-text" onclick="toggleClockReset()" title="隐藏时钟/复位">时钟</button>
+    </div>
+    <button id="btn-view-ops" class="ctb ctb-text" onclick="toggleViewOpsGroup()" title="画布操作">视图</button>
+    <!-- Export group -->
+    <div id="export-expand-panel" class="ctb-expand-panel" style="display:none;">
+      <button class="ctb ctb-text" onclick="exportSVG()" title="导出 SVG">SVG</button>
+      <button class="ctb ctb-text" onclick="exportPNG()" title="导出 PNG">PNG</button>
+      <button class="ctb ctb-text" onclick="exportHTML()" title="导出 HTML">HTML</button>
+    </div>
+    <button id="btn-export-group" class="ctb ctb-text" onclick="toggleExportGroup()" title="导出">导出</button>
+    <!-- Refresh -->
+    <button id="btn-refresh" class="ctb" onclick="refreshDesign()" title="刷新设计（重新分析源文件）">🔄</button>
+    <!-- Fullscreen -->
+    <button id="btn-fullscreen" class="ctb" onclick="toggleFullscreen()" title="全屏">⛶</button>
+  </div>
   <!-- Tab Bar -->
   <div id="tab-bar"></div>
 
   <!-- Canvas Area -->
   <div id="canvas-container">
+    <!-- Module view navigation overlay -->
+    <div id="view-nav-bar" style="display:none;">
+      <button id="btn-nav-back" class="nav-btn" onclick="viewHistoryBack()" title="返回上一视图 (Alt+←)" disabled>◀</button>
+      <button id="btn-nav-fwd" class="nav-btn" onclick="viewHistoryForward()" title="前进下一视图 (Alt+→)" disabled>▶</button>
+      <button id="btn-nav-up" class="nav-btn" onclick="viewHistoryUp()" title="返回上级模块 (Alt+↑)" disabled>▲</button>
+      <span id="module-breadcrumb" class="module-breadcrumb"></span>
+    </div>
     <div id="welcome-screen">
       <div class="welcome-content">
         <h1>⚡ Verilog Visualizer</h1>

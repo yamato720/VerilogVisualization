@@ -141,7 +141,7 @@ def reload_design():
         return jsonify({'error': f'Source path no longer exists: {source_path}'}), 404
 
     try:
-        result = analyze_and_save(source_path, DATA_DIR)
+        result = analyze_and_save(source_path, DATA_DIR, save_name_override=design_name)
         return jsonify({
             'success': True,
             'saved_as': result['saved_as'],
@@ -177,7 +177,7 @@ def refresh_design():
         return jsonify({'error': f'Source path no longer exists: {source_path}'}), 404
 
     try:
-        result = analyze_and_save(source_path, DATA_DIR)
+        result = analyze_and_save(source_path, DATA_DIR, save_name_override=design_name)
         return jsonify({
             'success': True,
             'saved_as': result['saved_as'],
@@ -300,7 +300,7 @@ def save_state():
         return jsonify({'error': 'Design not found'}), 404
     with open(json_path, 'r', encoding='utf-8') as f:
         design_data = json.load(f)
-    for key in ('layout', 'wire_waypoints', 'view_state', 'customizations'):
+    for key in ('layout', 'wire_waypoints', 'view_state', 'customizations', 'tree_expanded'):
         if key in data:
             design_data[key] = data[key]
     with open(json_path, 'w', encoding='utf-8') as f:
