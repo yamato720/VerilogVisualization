@@ -57,13 +57,20 @@ function loadHideClockReset() {
   catch(e) { return true; }
 }
 
-// Customization: { modules: { instName: { color, rename, comment } }, wires: { wireKey: { color } } }
+// Customization: { modules: { instName: { color, rename, comment } }, wires: { wireKey: { color } }, commentBlocks: { id: { x, y, width, height, markdown } } }
 function saveCustomizations(designName, data) {
   try { localStorage.setItem(STORAGE_CUSTOM_PREFIX + designName, JSON.stringify(data)); } catch(e) {}
 }
 function loadCustomizations(designName) {
-  try { const d = localStorage.getItem(STORAGE_CUSTOM_PREFIX + designName); return d ? JSON.parse(d) : { modules: {}, wires: {} }; }
-  catch(e) { return { modules: {}, wires: {} }; }
+  try { const d = localStorage.getItem(STORAGE_CUSTOM_PREFIX + designName); return normalizeCustomizations(d ? JSON.parse(d) : {}); }
+  catch(e) { return normalizeCustomizations({}); }
+}
+function normalizeCustomizations(data) {
+  return {
+    modules: data?.modules || {},
+    wires: data?.wires || {},
+    commentBlocks: data?.commentBlocks || {},
+  };
 }
 
 const STORAGE_CANVAS_BG = 'vviz_canvas_bg';
@@ -114,7 +121,7 @@ function syncStateToServer(designName) {
     name: designName,
     layout: state.layoutOverrides?.[designName] || {},
     wire_waypoints: state.wireWaypoints?.[designName] || {},
-    customizations: state.customizations?.[designName] || { modules: {}, wires: {} },
+    customizations: normalizeCustomizations(state.customizations?.[designName] || {}),
     tree_expanded: state.treeExpanded?.[designName] ? [...state.treeExpanded[designName]] : [],
     sidebar_ui: (() => {
       const sb = $('sidebar');
@@ -172,8 +179,9 @@ const state = {
   // Wire selection
   selectedWireKey: null,
   selectedWireSignal: null,   // signal name for the currently selected wire
-  // Customizations per design: { modules: {}, wires: {} }
+  // Customizations per design: { modules: {}, wires: {}, commentBlocks: {} }
   customizations: {},
+  activeCommentBlockId: null,
   // Settings modal context
   settingsTarget: null,  // { type: 'module'|'wire', key: instName|wireKey }
   // Undo/Redo
@@ -753,12 +761,83 @@ async function loadDesignList() {
   }
 }
 
+function nextFrame() {
+  return new Promise(resolve => requestAnimationFrame(() => resolve()));
+}
+
+function runWhenIdle(fn, timeout = 1200) {
+  if ('requestIdleCallback' in window) {
+    requestIdleCallback(fn, { timeout });
+  } else {
+    setTimeout(fn, 250);
+  }
+}
+
+let _fitToViewTimer = null;
+function scheduleFitToView(delay = 300) {
+  clearTimeout(_fitToViewTimer);
+  _fitToViewTimer = setTimeout(() => {
+    runWhenIdle(() => {
+      if (!state.dragging && !state.editMode) fitToView();
+    }, 1500);
+  }, delay);
+}
+
+function ensureLoadProgressEl() {
+  let overlay = $('load-progress-overlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'load-progress-overlay';
+  overlay.innerHTML = `
+    <div class="load-progress-card">
+      <div class="load-progress-title" id="load-progress-title"></div>
+      <div class="load-progress-message" id="load-progress-message"></div>
+      <div class="load-progress-track"><div class="load-progress-bar" id="load-progress-bar"></div></div>
+      <div class="load-progress-percent" id="load-progress-percent">0%</div>
+    </div>`;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+function showLoadProgress(title, pct = 0, message = '') {
+  const overlay = ensureLoadProgressEl();
+  overlay.style.display = 'flex';
+  $('load-progress-title').textContent = title || '加载中';
+  updateLoadProgress(pct, message);
+}
+
+function updateLoadProgress(pct, message) {
+  const overlay = ensureLoadProgressEl();
+  if (overlay.style.display === 'none') overlay.style.display = 'flex';
+  const safePct = Math.max(0, Math.min(100, Math.round(pct)));
+  const bar = $('load-progress-bar');
+  const percent = $('load-progress-percent');
+  const msg = $('load-progress-message');
+  if (bar) bar.style.width = safePct + '%';
+  if (percent) percent.textContent = safePct + '%';
+  if (msg && message != null) msg.textContent = message;
+}
+
+function hideLoadProgress() {
+  const overlay = $('load-progress-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
 async function openDesign(name) {
   showToast(`加载 ${name}...`, 'info');
+  showLoadProgress(`加载 ${name}`, 4, '获取设计 JSON...');
+  await nextFrame();
   try {
+    updateLoadProgress(8, '正在下载设计 JSON...');
     const res = await fetch(`/api/design/${name}`);
+    updateLoadProgress(18, '正在解析设计数据...');
+    await nextFrame();
     const data = await res.json();
-    if (data.error) { showToast('加载失败: ' + data.error, 'error'); return; }
+    if (data.error) { hideLoadProgress(); showToast('加载失败: ' + data.error, 'error'); return; }
+    const moduleCount = Object.keys(data.modules || {}).length;
+    const instCount = Object.values(data.modules || {}).reduce((sum, mod) => sum + (mod.instances?.length || 0), 0);
+    updateLoadProgress(26, `读取完成：${moduleCount} 个模块，${instCount} 个实例`);
+    await nextFrame();
 
     state.designs[name] = data;
     state.activeDesign = name;
@@ -772,6 +851,7 @@ async function openDesign(name) {
     }
 
     // Initialize sidebar tree expansion: load from server JSON, or pre-expand all modules with instances
+    updateLoadProgress(36, `初始化模块树：${moduleCount} 个模块`);
     if (!state.treeExpanded[name]) {
       if (data.tree_expanded && Array.isArray(data.tree_expanded)) {
         state.treeExpanded[name] = new Set(data.tree_expanded);
@@ -786,6 +866,7 @@ async function openDesign(name) {
     }
 
     // Load layout: server JSON is the source of truth (always synced on open/change).
+    updateLoadProgress(48, '恢复布局、连线和注释块...');
     // Fall back to localStorage only for old files that pre-date the sync feature.
     const serverLayout = data.layout || {};
     const localLayout = loadLayout(name);
@@ -820,24 +901,31 @@ async function openDesign(name) {
       state.wireWaypoints[name] = {};
     }
     // Load customizations: server JSON wins (synced on every change), fall back to localStorage for old files
-    const serverCustom = data.customizations || { modules: {}, wires: {} };
+    const serverCustom = normalizeCustomizations(data.customizations || {});
     const localCustom = loadCustomizations(name);
-    const hasServer = Object.keys(serverCustom.modules || {}).length > 0 || Object.keys(serverCustom.wires || {}).length > 0;
-    const hasLocal = Object.keys(localCustom.modules || {}).length > 0 || Object.keys(localCustom.wires || {}).length > 0;
+    const hasServer = Object.keys(serverCustom.modules || {}).length > 0
+      || Object.keys(serverCustom.wires || {}).length > 0
+      || Object.keys(serverCustom.commentBlocks || {}).length > 0;
+    const hasLocal = Object.keys(localCustom.modules || {}).length > 0
+      || Object.keys(localCustom.wires || {}).length > 0
+      || Object.keys(localCustom.commentBlocks || {}).length > 0;
     if (hasServer) {
       state.customizations[name] = hasLocal ? {
         modules: { ...localCustom.modules, ...serverCustom.modules },
-        wires: { ...localCustom.wires, ...serverCustom.wires }
+        wires: { ...localCustom.wires, ...serverCustom.wires },
+        commentBlocks: { ...localCustom.commentBlocks, ...serverCustom.commentBlocks },
       } : serverCustom;
       saveCustomizations(name, state.customizations[name]);
     } else if (hasLocal) {
       state.customizations[name] = localCustom;
     } else {
-      state.customizations[name] = { modules: {}, wires: {} };
+      state.customizations[name] = normalizeCustomizations({});
     }
 
     // Pre-populate layout overrides for any module not yet positioned, so that
     // dragging one module never causes other unpositioned modules to jump around.
+    updateLoadProgress(62, `计算模块位置：${instCount} 个实例`);
+    await nextFrame();
     const topModName = data.top_modules?.[0] || Object.keys(data.modules)[0];
     if (topModName && typeof computeInitialLayout === 'function') {
       const initial = computeInitialLayout(
@@ -872,6 +960,8 @@ async function openDesign(name) {
     state.activeTab = name;
 
     // Show sections
+    updateLoadProgress(74, '渲染模块树...');
+    await nextFrame();
     $('module-tree-section').style.display = '';
     const expSec = $('export-section'); if (expSec) expSec.style.display = '';
     $('welcome-screen').style.display = 'none';
@@ -879,13 +969,17 @@ async function openDesign(name) {
 
     renderTabs();
     renderSidebar(name);
+    updateLoadProgress(86, `渲染画布：${moduleCount} 个模块`);
+    await nextFrame();
     renderCanvas();
+    updateLoadProgress(96, '完成画布初始化...');
+    await nextFrame();
     loadDesignList();  // update highlight
 
     // Always sync current state to server JSON so the file stays portable.
     // This ensures localStorage positions/waypoints/customizations are written
     // into the JSON even if the user hasn't made any changes since the last sync.
-    syncStateToServer(name);
+    scheduleSyncToServer(name);
 
     // Restore sidebar UI state from JSON
     const sui = data.sidebar_ui;
@@ -921,8 +1015,11 @@ async function openDesign(name) {
       if (cc.fullscreen_key != null) state.canvasControls.fullscreenKey = cc.fullscreen_key;
     }
 
+    updateLoadProgress(100, '加载完成');
+    setTimeout(hideLoadProgress, 250);
     showToast(`已加载: ${name}`, 'success');
   } catch (err) {
+    hideLoadProgress();
     showToast('加载失败: ' + err.message, 'error');
   }
 }
@@ -1559,6 +1656,7 @@ function renderCanvas() {
   // Load layout overrides from state (populated from localStorage on openDesign)
   const layoutOvr = state.layoutOverrides[tab.name] || {};
   const wireWps = state.wireWaypoints[tab.name] || {};
+  state.customizations[tab.name] = normalizeCustomizations(state.customizations[tab.name] || {});
 
   // Clear & render
   svgRoot.innerHTML = '';
@@ -1568,6 +1666,7 @@ function renderCanvas() {
     customizations: state.customizations[tab.name] || { modules: {}, wires: {} },
   });
   svgRoot.appendChild(rootG);
+  renderCommentBlocks(rootG, tab.name);
 
   // Apply current transform
   applyTransform();
@@ -1583,6 +1682,7 @@ function renderCanvas() {
     // Double-click on a sub-module box: navigate INTO that module's internal view
     box.addEventListener('dblclick', e => {
       e.stopPropagation();
+      clearActiveCommentBlock();
       if (!instName) return; // top-level bounding box, no instance
       if (!modName || !modules[modName]?.instances?.length) return; // leaf module
       navigateToModuleView(tab.name, modName);
@@ -1592,6 +1692,7 @@ function renderCanvas() {
     box.addEventListener('contextmenu', e => {
       e.preventDefault();
       e.stopPropagation();
+      clearActiveCommentBlock();
       if (!instName) return;
       const customs = state.customizations[tab.name] || { modules: {} };
       const modCustom = customs.modules?.[instName] || {};
@@ -1605,6 +1706,7 @@ function renderCanvas() {
     if (gearIcon) {
       gearIcon.addEventListener('click', e => {
         e.stopPropagation();
+        clearActiveCommentBlock();
         if (!instName) return;
         state.settingsTarget = { type: 'module', key: instName, modName };
         openSettingsPanel();
@@ -1615,6 +1717,14 @@ function renderCanvas() {
     box.addEventListener('click', e => {
       if (state.justFinishedDrag) return;
       e.stopPropagation();
+      clearActiveCommentBlock();
+      if (instName) {
+        updateModuleClickSelection(instName, e.shiftKey, e.ctrlKey || e.metaKey);
+      }
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        closeCommentPopup();
+        return;
+      }
       const customs = state.customizations[tab.name] || { modules: {} };
       const modCustom = customs.modules?.[instName] || {};
       if (modCustom.comment) {
@@ -1638,6 +1748,7 @@ function renderCanvas() {
         if (e.button !== 0) return;
         e.stopPropagation();
         e.preventDefault();
+        clearActiveCommentBlock();
         startModuleDrag(e, instName, box);
       });
     }
@@ -1650,6 +1761,7 @@ function renderCanvas() {
         if (e.button !== 0) return;
         e.stopPropagation();
         e.preventDefault();
+        clearActiveCommentBlock();
         startModuleDrag(e, instName, box);
       });
     }
@@ -1661,6 +1773,7 @@ function renderCanvas() {
       if (e.button !== 0) return;
       e.stopPropagation();
       e.preventDefault();
+      clearActiveCommentBlock();
       const instName = rh.getAttribute('data-instance');
       if (!instName) return;
       startModuleResize(e, instName, rh.closest('.module-box'));
@@ -1672,6 +1785,7 @@ function renderCanvas() {
     pg.style.cursor = 'pointer';
     pg.addEventListener('click', e => {
       e.stopPropagation();
+      clearActiveCommentBlock();
       const key = pg.getAttribute('data-group-key');
       state.collapsedState[key] = true; // true = expanded
       saveCollapsedState(state.collapsedState);
@@ -1684,6 +1798,7 @@ function renderCanvas() {
     pg.style.cursor = 'pointer';
     pg.addEventListener('click', e => {
       e.stopPropagation();
+      clearActiveCommentBlock();
       const key = pg.getAttribute('data-group-key');
       state.collapsedState[key] = false; // false = collapsed
       saveCollapsedState(state.collapsedState);
@@ -1694,6 +1809,9 @@ function renderCanvas() {
   // ── Click on background to deselect wire ──
   getSVG().addEventListener('click', e => {
     if (state.justFinishedDrag) return; // Don't deselect after drag operations
+    if (!e.target.closest?.('.comment-block')) {
+      clearActiveCommentBlock();
+    }
     if (e.target === getSVG() || e.target.id === 'svg-root') {
       // Don't clear box selection on background click — use close button
       if (state.selectedWireKey) {
@@ -1732,6 +1850,7 @@ function renderCanvas() {
     // Single click: toggle persistent selection
     wg.addEventListener('click', e => {
       e.stopPropagation();
+      clearActiveCommentBlock();
       if (!wireKey) return;
       if (state.selectedWireKey === wireKey) {
         state.selectedWireKey = null;
@@ -1801,6 +1920,7 @@ function renderCanvas() {
       if (e.button !== 0) return;
       e.stopPropagation();
       e.preventDefault();
+      clearActiveCommentBlock();
       const wireKey = wp.getAttribute('data-wire-key');
       const wpIdx = parseInt(wp.getAttribute('data-wp-index'));
       startWaypointDrag(e, wireKey, wpIdx, wp);
@@ -1809,6 +1929,7 @@ function renderCanvas() {
     // Single click on waypoint: select its wire and auto-expand the waypoint panel
     wp.addEventListener('click', e => {
       e.stopPropagation();
+      clearActiveCommentBlock();
       const wireKey = wp.getAttribute('data-wire-key');
       const wg = svgRoot.querySelector(`.wire-group[data-wire-key="${CSS.escape(wireKey)}"]`);
       const signal = wg ? wg.getAttribute('data-signal') : wireKey;
@@ -1877,7 +1998,7 @@ function renderCanvas() {
     state.zoom = savedView.zoom;
     applyTransform();
   } else if (state.pan.x === 0 && state.pan.y === 0 && state.zoom === 1) {
-    setTimeout(fitToView, 50);
+    scheduleFitToView(450);
   }
 
   // Re-apply box selection highlights if active
@@ -1903,6 +2024,345 @@ function svgToDesignCoords(clientX, clientY) {
     x: (svgX - state.pan.x) / state.zoom,
     y: (svgY - state.pan.y) / state.zoom,
   };
+}
+
+// ─── Persistent Comment Blocks ─────────────────────────────────────────
+
+function getActiveCommentBlock() {
+  const id = state.activeCommentBlockId;
+  if (!id || !state.activeTab) return null;
+  const block = state.customizations[state.activeTab]?.commentBlocks?.[id];
+  return block ? { id, block } : null;
+}
+
+function clearActiveCommentBlock() {
+  if (!state.activeCommentBlockId) return;
+  state.activeCommentBlockId = null;
+  const svgRoot = getSVGRoot();
+  svgRoot?.querySelectorAll('.comment-block.active').forEach(g => g.classList.remove('active'));
+  svgRoot?.querySelectorAll('.comment-block-handles').forEach(g => g.remove());
+}
+
+function renderMarkdownHtml(markdown) {
+  const md = markdown || '';
+  if (window.marked) return window.marked.parse(md);
+  return escHtml(md)
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\n/g, '<br>');
+}
+
+function getCommentBlockTitle(block) {
+  if (block?.title) return block.title;
+  const firstText = (block?.markdown || '').split('\n').find(line => line.trim());
+  return firstText ? firstText.replace(/^#+\s*/, '').trim() : '注释块';
+}
+
+function renderCommentBlocks(rootG, designName) {
+  const customs = normalizeCustomizations(state.customizations[designName] || {});
+  const blocks = customs.commentBlocks || {};
+  if (Object.keys(blocks).length === 0) return;
+
+  const layer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  layer.id = 'comment-block-layer';
+
+  for (const [id, block] of Object.entries(blocks)) {
+    if (!block.title) block.title = getCommentBlockTitle(block);
+    const width = Math.max(80, block.width || 220);
+    const height = Math.max(50, block.height || 120);
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.classList.add('comment-block');
+    if (state.activeCommentBlockId === id) g.classList.add('active');
+    g.setAttribute('data-comment-block-id', id);
+    g.setAttribute('transform', `translate(${block.x || 0}, ${block.y || 0})`);
+
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('class', 'comment-block-rect');
+    rect.setAttribute('x', 0);
+    rect.setAttribute('y', 0);
+    rect.setAttribute('width', width);
+    rect.setAttribute('height', height);
+    rect.setAttribute('rx', 12);
+    rect.setAttribute('ry', 12);
+    rect.style.cursor = 'move';
+    g.appendChild(rect);
+
+    const fo = document.createElementNS('http://www.w3.org/2000/svg', 'foreignObject');
+    fo.setAttribute('x', 8);
+    fo.setAttribute('y', 8);
+    fo.setAttribute('width', Math.max(20, width - 16));
+    fo.setAttribute('height', Math.max(14, height - 16));
+    fo.setAttribute('pointer-events', 'none');
+    const body = document.createElement('div');
+    body.className = 'comment-block-body';
+    body.textContent = getCommentBlockTitle(block);
+    fo.appendChild(body);
+    g.appendChild(fo);
+
+    if (state.activeCommentBlockId === id) {
+      appendCommentBlockResizeHandles(g, id, width, height);
+    }
+
+    g.addEventListener('mousedown', e => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      startCommentBlockDrag(e, id);
+    });
+    g.addEventListener('click', e => {
+      e.stopPropagation();
+      state.activeCommentBlockId = id;
+      renderCanvas();
+    });
+    g.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      state.activeCommentBlockId = id;
+      state.settingsTarget = { type: 'commentBlock', key: id };
+      openSettingsPanel();
+    });
+
+    layer.appendChild(g);
+  }
+
+  rootG.insertBefore(layer, rootG.firstChild);
+}
+
+function appendCommentBlockResizeHandles(g, id, width, height) {
+  const handlesG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  handlesG.classList.add('comment-block-handles');
+  const hs = 3.5 / state.zoom;
+  const points = [
+    { role: 'nw', x: 0, y: 0, cursor: 'nw-resize' },
+    { role: 'n', x: width / 2, y: 0, cursor: 'n-resize' },
+    { role: 'ne', x: width, y: 0, cursor: 'ne-resize' },
+    { role: 'e', x: width, y: height / 2, cursor: 'e-resize' },
+    { role: 'se', x: width, y: height, cursor: 'se-resize' },
+    { role: 's', x: width / 2, y: height, cursor: 's-resize' },
+    { role: 'sw', x: 0, y: height, cursor: 'sw-resize' },
+    { role: 'w', x: 0, y: height / 2, cursor: 'w-resize' },
+  ];
+  points.forEach(h => {
+    const hr = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    hr.setAttribute('class', 'comment-block-handle');
+    hr.setAttribute('data-role', h.role);
+    hr.setAttribute('x', h.x - hs);
+    hr.setAttribute('y', h.y - hs);
+    hr.setAttribute('width', hs * 2);
+    hr.setAttribute('height', hs * 2);
+    hr.setAttribute('rx', 1 / state.zoom);
+    hr.style.cursor = h.cursor;
+    hr.addEventListener('mousedown', e => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      startCommentBlockResize(e, id, h.role);
+    });
+    handlesG.appendChild(hr);
+  });
+  g.appendChild(handlesG);
+}
+
+function startCommentBlockDrag(e, id) {
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  const block = state.customizations[state.activeTab]?.commentBlocks?.[id];
+  if (!pt || !block) return;
+  state.activeCommentBlockId = id;
+  state.editMode = 'drag-comment-block';
+  state.editTarget = {
+    id,
+    startX: pt.x,
+    startY: pt.y,
+    origX: block.x || 0,
+    origY: block.y || 0,
+    moveContents: e.shiftKey,
+    origPositions: {},
+    origWaypoints: {},
+  };
+  if (e.shiftKey) collectCommentBlockContents(block, state.editTarget);
+  $('canvas-container').style.cursor = 'move';
+}
+
+function onCommentBlockDragMove(e) {
+  const t = state.editTarget;
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  if (!t || !pt) return;
+  const g = getSVGRoot()?.querySelector(`.comment-block[data-comment-block-id="${CSS.escape(t.id)}"]`);
+  if (g) g.setAttribute('transform', `translate(${t.origX + pt.x - t.startX}, ${t.origY + pt.y - t.startY})`);
+  if (t.moveContents) {
+    const dx = pt.x - t.startX;
+    const dy = pt.y - t.startY;
+    for (const orig of Object.values(t.origPositions)) {
+      orig.boxEl?.setAttribute('transform', `translate(${orig.x + dx}, ${orig.y + dy})`);
+    }
+    const svgRoot = getSVGRoot();
+    for (const orig of Object.values(t.origWaypoints)) {
+      const wp = svgRoot.querySelector(`.wire-waypoint[data-wire-key="${CSS.escape(orig.wireKey)}"][data-wp-index="${orig.idx}"]`);
+      if (wp) {
+        wp.setAttribute('cx', orig.x + dx);
+        wp.setAttribute('cy', orig.y + dy);
+      }
+    }
+  }
+}
+
+function onCommentBlockDragEnd(e) {
+  const t = state.editTarget;
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  const block = state.customizations[state.activeTab]?.commentBlocks?.[t?.id];
+  if (t && pt && block) {
+    block.x = t.origX + pt.x - t.startX;
+    block.y = t.origY + pt.y - t.startY;
+    saveCustomizations(state.activeTab, state.customizations[state.activeTab]);
+    scheduleSyncToServer(state.activeTab);
+    if (t.moveContents) persistMovedCommentBlockContents(t, pt.x - t.startX, pt.y - t.startY);
+  }
+  state.editMode = null;
+  state.editTarget = null;
+  $('canvas-container').style.cursor = 'grab';
+  state.justFinishedDrag = true;
+  setTimeout(() => { state.justFinishedDrag = false; }, 50);
+  renderCanvas();
+}
+
+function collectCommentBlockContents(block, target) {
+  const x1 = block.x || 0;
+  const y1 = block.y || 0;
+  const x2 = x1 + Math.max(80, block.width || 220);
+  const y2 = y1 + Math.max(50, block.height || 120);
+  const svgRoot = getSVGRoot();
+  svgRoot.querySelectorAll('.module-box').forEach(box => {
+    const instName = box.getAttribute('data-instance');
+    if (!instName) return;
+    const m = box.getAttribute('transform')?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
+    if (!m) return;
+    const mx = parseFloat(m[1]);
+    const my = parseFloat(m[2]);
+    const r = box.querySelector('.module-rect');
+    const mw = r ? parseFloat(r.getAttribute('width')) : 150;
+    const mh = r ? parseFloat(r.getAttribute('height')) : 100;
+    const cx = mx + mw / 2;
+    const cy = my + mh / 2;
+    if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2) {
+      target.origPositions[instName] = { x: mx, y: my, boxEl: box };
+    }
+  });
+  svgRoot.querySelectorAll('.wire-waypoint').forEach(wp => {
+    const x = parseFloat(wp.getAttribute('cx'));
+    const y = parseFloat(wp.getAttribute('cy'));
+    if (x >= x1 && x <= x2 && y >= y1 && y <= y2) {
+      const wireKey = wp.getAttribute('data-wire-key');
+      const idx = parseInt(wp.getAttribute('data-wp-index'));
+      target.origWaypoints[`${wireKey}:${idx}`] = { x, y, wireKey, idx };
+    }
+  });
+}
+
+function persistMovedCommentBlockContents(target, dx, dy) {
+  const designName = state.activeTab;
+  if (!designName) return;
+  const hasModules = Object.keys(target.origPositions || {}).length > 0;
+  const hasWaypoints = Object.keys(target.origWaypoints || {}).length > 0;
+  if (hasModules || hasWaypoints) pushUndoSnapshot();
+  if (hasModules) {
+    if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
+    for (const [instName, orig] of Object.entries(target.origPositions)) {
+      const ovr = state.layoutOverrides[designName][instName] || {};
+      ovr.x = orig.x + dx - 50;
+      ovr.y = orig.y + dy - 50;
+      state.layoutOverrides[designName][instName] = ovr;
+    }
+    saveLayout(designName, state.layoutOverrides[designName]);
+  }
+  if (hasWaypoints) {
+    for (const orig of Object.values(target.origWaypoints)) {
+      if (state.wireWaypoints[designName]?.[orig.wireKey]?.[orig.idx]) {
+        state.wireWaypoints[designName][orig.wireKey][orig.idx] = { x: orig.x + dx, y: orig.y + dy };
+      }
+    }
+    saveWireWaypoints(designName, state.wireWaypoints[designName]);
+  }
+}
+
+function computeCommentBlockResize(orig, handle, dx, dy) {
+  let x1 = orig.x, y1 = orig.y, x2 = orig.x + orig.width, y2 = orig.y + orig.height;
+  if (handle.includes('w')) x1 += dx;
+  if (handle.includes('e')) x2 += dx;
+  if (handle.includes('n')) y1 += dy;
+  if (handle.includes('s')) y2 += dy;
+  const minW = 80, minH = 50;
+  if (x2 - x1 < minW) handle.includes('w') ? x1 = x2 - minW : x2 = x1 + minW;
+  if (y2 - y1 < minH) handle.includes('n') ? y1 = y2 - minH : y2 = y1 + minH;
+  return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+}
+
+function updateCommentBlockVisual(id, rect) {
+  const g = getSVGRoot()?.querySelector(`.comment-block[data-comment-block-id="${CSS.escape(id)}"]`);
+  if (!g) return;
+  g.setAttribute('transform', `translate(${rect.x}, ${rect.y})`);
+  const r = g.querySelector('.comment-block-rect');
+  if (r) {
+    r.setAttribute('width', rect.width);
+    r.setAttribute('height', rect.height);
+  }
+  const fo = g.querySelector('foreignObject');
+  if (fo) {
+    fo.setAttribute('width', Math.max(20, rect.width - 16));
+    fo.setAttribute('height', Math.max(14, rect.height - 16));
+  }
+  const handles = g.querySelector('.comment-block-handles');
+  if (handles) {
+    handles.remove();
+    appendCommentBlockResizeHandles(g, id, rect.width, rect.height);
+  }
+}
+
+function startCommentBlockResize(e, id, handle) {
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  const block = state.customizations[state.activeTab]?.commentBlocks?.[id];
+  if (!pt || !block) return;
+  state.activeCommentBlockId = id;
+  state.editMode = 'resize-comment-block';
+  state.editTarget = {
+    id,
+    handle,
+    startX: pt.x,
+    startY: pt.y,
+    orig: {
+      x: block.x || 0,
+      y: block.y || 0,
+      width: Math.max(80, block.width || 220),
+      height: Math.max(50, block.height || 120),
+    },
+  };
+  $('canvas-container').style.cursor = e.currentTarget?.style?.cursor || 'crosshair';
+}
+
+function onCommentBlockResizeMove(e) {
+  const t = state.editTarget;
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  if (!t || !pt) return;
+  updateCommentBlockVisual(t.id, computeCommentBlockResize(t.orig, t.handle, pt.x - t.startX, pt.y - t.startY));
+}
+
+function onCommentBlockResizeEnd(e) {
+  const t = state.editTarget;
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  const block = state.customizations[state.activeTab]?.commentBlocks?.[t?.id];
+  if (t && block) {
+    const rect = pt ? computeCommentBlockResize(t.orig, t.handle, pt.x - t.startX, pt.y - t.startY) : t.orig;
+    Object.assign(block, rect);
+    saveCustomizations(state.activeTab, state.customizations[state.activeTab]);
+    scheduleSyncToServer(state.activeTab);
+  }
+  state.editMode = null;
+  state.editTarget = null;
+  $('canvas-container').style.cursor = 'grab';
+  renderCanvas();
 }
 
 // ─── Module drag ────────────────────────────────────────────────────────
@@ -2344,6 +2804,7 @@ function initPanZoom() {
     // Only pan on background clicks
     const tag = e.target.tagName.toLowerCase();
     if (tag === 'svg' || e.target === container || e.target.id === 'main-svg') {
+      clearActiveCommentBlock();
       // Shift+click starts box selection
       if (e.shiftKey) {
         const pt = svgToDesignCoords(e.clientX, e.clientY);
@@ -2369,6 +2830,8 @@ function initPanZoom() {
     if (state.editMode === 'drag-module') { onModuleDragMove(e); return; }
     if (state.editMode === 'resize-module') { onModuleResizeMove(e); return; }
     if (state.editMode === 'drag-waypoint') { onWaypointDragMove(e); return; }
+    if (state.editMode === 'drag-comment-block') { onCommentBlockDragMove(e); return; }
+    if (state.editMode === 'resize-comment-block') { onCommentBlockResizeMove(e); return; }
     if (state.editMode === 'drag-box-selection') { onBoxSelectionDragMove(e); return; }
     if (state.editMode === 'resize-box-selection') { onBoxSelectionResizeMove(e); return; }
     // Box selecting (rubber-band)
@@ -2392,6 +2855,8 @@ function initPanZoom() {
     if (state.editMode === 'drag-module') { onModuleDragEnd(e); return; }
     if (state.editMode === 'resize-module') { onModuleResizeEnd(e); return; }
     if (state.editMode === 'drag-waypoint') { onWaypointDragEnd(e); return; }
+    if (state.editMode === 'drag-comment-block') { onCommentBlockDragEnd(e); return; }
+    if (state.editMode === 'resize-comment-block') { onCommentBlockResizeEnd(e); return; }
     if (state.editMode === 'drag-box-selection') { onBoxSelectionDragEnd(e); return; }
     if (state.editMode === 'resize-box-selection') { onBoxSelectionResizeEnd(e); return; }
     // Box selection end
@@ -2511,6 +2976,7 @@ function initPanZoom() {
     if (dx !== 0 || dy !== 0) {
       const step = cc.wasdStep;
       const sel = state.boxSelection?.items;
+      const activeBlock = getActiveCommentBlock();
       if (sel && sel.size > 0) {
         const designName = state.activeTab;
         if (designName && state.layoutOverrides[designName]) {
@@ -2525,9 +2991,24 @@ function initPanZoom() {
             ovr.y = parseFloat(m[2]) + dy * step - 50;
             state.layoutOverrides[designName][instName] = ovr;
           });
+          if (state.boxSelection?.queryRect) {
+            const qr = state.boxSelection.queryRect;
+            state.boxSelection.queryRect = {
+              x1: qr.x1 + dx * step,
+              y1: qr.y1 + dy * step,
+              x2: qr.x2 + dx * step,
+              y2: qr.y2 + dy * step,
+            };
+          }
           renderCanvas();
           saveLayout(designName, state.layoutOverrides[designName]);
         }
+      } else if (activeBlock) {
+        activeBlock.block.x += dx * step;
+        activeBlock.block.y += dy * step;
+        saveCustomizations(state.activeTab, state.customizations[state.activeTab]);
+        scheduleSyncToServer(state.activeTab);
+        renderCanvas();
       } else {
         state.pan.x -= dx * step;
         state.pan.y -= dy * step;
@@ -2638,6 +3119,11 @@ function showShortcutHelp() {
         <thead><tr><th style="${thStyle}">按键</th><th style="${th2Style}">功能</th></tr></thead>
         <tbody>
           <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">W A S D</kbd></td><td style="${td2Style}">移动画布 / 微调选中模块位置</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">单击模块</kbd></td><td style="${td2Style}">选中单个模块，用 W/A/S/D 微调</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">Shift + 单击模块</kbd></td><td style="${td2Style}">连续增删多个选中模块，一起微调</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">Ctrl + 单击模块</kbd></td><td style="${td2Style}">用当前选区和目标模块拟合外框，并自动选中框内模块/拐点</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">Shift + 空白拖拽</kbd></td><td style="${td2Style}">框选模块和线拐点</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">Shift + 拖拽注释块</kbd></td><td style="${td2Style}">移动注释块及其框内模块/拐点</td></tr>
           <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">${escHtml(cc.zoomKeyIn)}</kbd></td><td style="${td2Style}">放大视图</td></tr>
           <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">${escHtml(cc.zoomKeyOut)}</kbd></td><td style="${td2Style}">缩小视图</td></tr>
           <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">${escHtml(cc.helpKey)}</kbd></td><td style="${td2Style}">打开/关闭快捷键说明</td></tr>
@@ -2652,6 +3138,7 @@ function showShortcutHelp() {
           <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">滚轮</kbd></td><td style="${td2Style}">缩放（以鼠标为中心）</td></tr>
           <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">中键拖拽</kbd></td><td style="${td2Style}">平移画布</td></tr>
           <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">框选 + 拖拽</kbd></td><td style="${td2Style}">批量选中并移动模块</td></tr>
+          <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">框选 + 注</kbd></td><td style="${td2Style}">转换为永久注释块</td></tr>
           <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">双击模块</kbd></td><td style="${td2Style}">进入子模块视图</td></tr>
           <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">右键模块</kbd></td><td style="${td2Style}">显示注释（如有）</td></tr>
           <tr><td style="${tdStyle}"><kbd style="${kbdStyle}">⚙ 图标</kbd></td><td style="${td2Style}">打开模块设置（颜色/注释/端口/寄存器）</td></tr>
@@ -2814,7 +3301,7 @@ function openSettingsPanel() {
   const target = state.settingsTarget;
   if (!target || !state.activeTab) return;
 
-  const customs = state.customizations[state.activeTab] || { modules: {}, wires: {} };
+  const customs = normalizeCustomizations(state.customizations[state.activeTab] || {});
   const content = $('settings-content');
   content.innerHTML = '';
 
@@ -3037,6 +3524,30 @@ function openSettingsPanel() {
         <button class="btn-secondary" onclick="document.getElementById('set-wire-color').value='#4fc3f7';document.getElementById('set-wire-color-hex').value='#4fc3f7'" style="padding:4px 8px;font-size:11px;">重置</button>
       </div>
       ${buildSwatches('set-wire-color')}`;
+  } else if (target.type === 'commentBlock') {
+    const existing = customs.commentBlocks?.[target.key] || {};
+    const title = getCommentBlockTitle(existing);
+    const markdown = existing.markdown || '';
+    content.innerHTML = `
+      <h4 style="color:#c9d1d9;margin-bottom:8px;">注释块设置</h4>
+      <div class="settings-row" style="margin-bottom:10px;">
+        <label>标题</label>
+        <input type="text" id="set-comment-block-title" class="vv-dark-input" placeholder="注释块标题..." value="${escHtml(title)}" />
+      </div>
+      <div class="bd-cust-tabs" style="margin-bottom:10px;">
+        <button class="bd-cust-tab bd-cust-tab-active" onclick="vvSwitchSettingsTab(this,'vv-tab-comment-preview')">Markdown 预览</button>
+        <button class="bd-cust-tab" onclick="vvSwitchSettingsTab(this,'vv-tab-comment-source')">Markdown 源码</button>
+      </div>
+      <div id="vv-tab-comment-preview" class="markdown-body" style="display:block;overflow:auto;flex:1;min-height:0;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
+        <h2>${escHtml(title)}</h2>${renderMarkdownHtml(markdown) || '<span style="color:#484f58;">暂无内容</span>'}
+      </div>
+      <div id="vv-tab-comment-source" style="display:none;flex-direction:column;gap:8px;flex:1;min-height:0;">
+        <textarea id="set-comment-block-markdown" class="vv-dark-textarea" placeholder="支持 Markdown 格式..." style="flex:1;resize:none;min-height:160px;">${escHtml(markdown)}</textarea>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn-secondary" onclick="document.getElementById('comment-file-input').click()" style="padding:4px 10px;font-size:11px;">📂 导入 .md 文件</button>
+          <button class="btn-secondary" onclick="deleteCommentBlock('${target.key}')" style="padding:4px 10px;font-size:11px;color:#ff7b72;">删除注释块</button>
+        </div>
+      </div>`;
   }
 
   $('settings-overlay').style.display = 'flex';
@@ -3058,12 +3569,21 @@ function closeSettingsModal() {
 function vvSwitchSettingsTab(btn, panelId) {
   const content = $('settings-content');
   if (!content) return;
+  if (panelId === 'vv-tab-comment-preview') {
+    const preview = $('vv-tab-comment-preview');
+    const source = $('set-comment-block-markdown');
+    const title = $('set-comment-block-title')?.value?.trim();
+    if (preview && source) {
+      const titleHtml = title ? `<h2>${escHtml(title)}</h2>` : '';
+      preview.innerHTML = titleHtml + (renderMarkdownHtml(source.value) || '<span style="color:#484f58;">暂无内容</span>');
+    }
+  }
   content.querySelectorAll('.bd-cust-tab').forEach(t => t.classList.remove('bd-cust-tab-active'));
   btn.classList.add('bd-cust-tab-active');
   content.querySelectorAll('[id^="vv-tab-"]').forEach(el => {
     const show = el.id === panelId;
-    // basic tab uses flex column; ports/regs tabs are scrollable blocks
-    el.style.display = show ? (el.id === 'vv-tab-basic' ? 'flex' : 'block') : 'none';
+    const flexTabs = new Set(['vv-tab-basic', 'vv-tab-comment-source']);
+    el.style.display = show ? (flexTabs.has(el.id) ? 'flex' : 'block') : 'none';
   });
 }
 
@@ -3319,7 +3839,9 @@ function handleCommentFileImport(event) {
   const reader = new FileReader();
   reader.onload = (e) => {
     const content = e.target.result;
-    const textarea = $('set-mod-comment');
+    const textarea = state.settingsTarget?.type === 'commentBlock'
+      ? $('set-comment-block-markdown')
+      : $('set-mod-comment');
     if (textarea) textarea.value = content;
 
     // Save to server under data/<designName>/<instName>.md
@@ -3352,9 +3874,10 @@ function applySettings() {
   if (!target || !state.activeTab) return;
 
   if (!state.customizations[state.activeTab]) {
-    state.customizations[state.activeTab] = { modules: {}, wires: {} };
+    state.customizations[state.activeTab] = normalizeCustomizations({});
   }
-  const customs = state.customizations[state.activeTab];
+  const customs = normalizeCustomizations(state.customizations[state.activeTab]);
+  state.customizations[state.activeTab] = customs;
 
   if (target.type === 'module') {
     const hexVal = $('set-mod-color-hex')?.value;
@@ -3379,6 +3902,13 @@ function applySettings() {
     } else {
       delete customs.wires[target.key];
     }
+  } else if (target.type === 'commentBlock') {
+    if (!customs.commentBlocks) customs.commentBlocks = {};
+    const block = customs.commentBlocks[target.key];
+    if (block) {
+      block.title = $('set-comment-block-title')?.value?.trim() || '注释块';
+      block.markdown = $('set-comment-block-markdown')?.value || '';
+    }
   }
 
   saveCustomizations(state.activeTab, customs);
@@ -3388,6 +3918,22 @@ function applySettings() {
   renderCanvas();
   showToast('设置已应用', 'success');
 }
+
+function deleteCommentBlock(id) {
+  if (!state.activeTab) return;
+  const customs = normalizeCustomizations(state.customizations[state.activeTab] || {});
+  if (customs.commentBlocks?.[id]) {
+    delete customs.commentBlocks[id];
+    state.customizations[state.activeTab] = customs;
+    if (state.activeCommentBlockId === id) state.activeCommentBlockId = null;
+    saveCustomizations(state.activeTab, customs);
+    scheduleSyncToServer(state.activeTab);
+    closeSettingsModal();
+    renderCanvas();
+    showToast('注释块已删除', 'success');
+  }
+}
+window.deleteCommentBlock = deleteCommentBlock;
 
 // ─── Box Selection ──────────────────────────────────────────────────────
 
@@ -3414,6 +3960,157 @@ function drawBoxSelectionRect() {
   rect.setAttribute('y', y);
   rect.setAttribute('width', w);
   rect.setAttribute('height', h);
+}
+
+function getModuleBoxBounds(instName) {
+  const svgRoot = getSVGRoot();
+  const box = svgRoot?.querySelector(`.module-box[data-instance="${CSS.escape(instName)}"]`);
+  if (!box) return null;
+  const transform = box.getAttribute('transform');
+  const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
+  if (!match) return null;
+  const x = parseFloat(match[1]);
+  const y = parseFloat(match[2]);
+  const rect = box.querySelector('.module-rect');
+  const width = rect ? parseFloat(rect.getAttribute('width')) : 150;
+  const height = rect ? parseFloat(rect.getAttribute('height')) : 100;
+  return { x, y, width, height };
+}
+
+function setModuleSelection(instNames) {
+  const designName = state.activeTab;
+  const items = new Set([...instNames].filter(Boolean));
+  if (!designName || items.size === 0) {
+    clearBoxSelection();
+    return;
+  }
+
+  let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+  items.forEach(instName => {
+    const b = getModuleBoxBounds(instName);
+    if (!b) return;
+    x1 = Math.min(x1, b.x);
+    y1 = Math.min(y1, b.y);
+    x2 = Math.max(x2, b.x + b.width);
+    y2 = Math.max(y2, b.y + b.height);
+  });
+  if (!Number.isFinite(x1)) {
+    clearBoxSelection();
+    return;
+  }
+
+  const snapLayoutOverrides = {};
+  items.forEach(instName => {
+    const ovr = state.layoutOverrides[designName]?.[instName];
+    snapLayoutOverrides[instName] = ovr ? { ...ovr } : null;
+  });
+
+  state.boxSelection = {
+    items,
+    waypoints: [],
+    queryRect: { x1, y1, x2, y2 },
+    snapLayoutOverrides,
+    snapWireWaypoints: {},
+  };
+  renderBoxSelectionHighlight();
+}
+
+function setSelectionFromQueryRect(queryRect) {
+  const designName = state.activeTab;
+  if (!designName || !queryRect) {
+    clearBoxSelection();
+    return;
+  }
+  const { x1: selX1, y1: selY1, x2: selX2, y2: selY2 } = queryRect;
+  const selectedModules = new Set();
+  const selectedWaypoints = [];
+  const svgRoot = getSVGRoot();
+
+  svgRoot.querySelectorAll('.module-box').forEach(box => {
+    const instName = box.getAttribute('data-instance');
+    if (!instName) return;
+    const b = getModuleBoxBounds(instName);
+    if (!b) return;
+    const cx = b.x + b.width / 2;
+    const cy = b.y + b.height / 2;
+    if (cx >= selX1 && cx <= selX2 && cy >= selY1 && cy <= selY2) {
+      selectedModules.add(instName);
+    }
+  });
+
+  svgRoot.querySelectorAll('.wire-waypoint').forEach(wp => {
+    const x = parseFloat(wp.getAttribute('cx'));
+    const y = parseFloat(wp.getAttribute('cy'));
+    if (x >= selX1 && x <= selX2 && y >= selY1 && y <= selY2) {
+      selectedWaypoints.push({
+        wireKey: wp.getAttribute('data-wire-key'),
+        idx: parseInt(wp.getAttribute('data-wp-index')),
+      });
+    }
+  });
+
+  if (selectedModules.size === 0 && selectedWaypoints.length === 0) {
+    clearBoxSelection();
+    return;
+  }
+
+  const snapLayoutOverrides = {};
+  selectedModules.forEach(name => {
+    const ovr = state.layoutOverrides[designName]?.[name];
+    snapLayoutOverrides[name] = ovr ? { ...ovr } : null;
+  });
+  const snapWireWaypoints = {};
+  selectedWaypoints.forEach(wpRef => {
+    const wps = state.wireWaypoints[designName]?.[wpRef.wireKey];
+    if (wps?.[wpRef.idx]) {
+      snapWireWaypoints[`${wpRef.wireKey}:${wpRef.idx}`] = {
+        x: wps[wpRef.idx].x,
+        y: wps[wpRef.idx].y,
+        wireKey: wpRef.wireKey,
+        idx: wpRef.idx,
+      };
+    }
+  });
+
+  state.boxSelection = {
+    items: selectedModules,
+    waypoints: selectedWaypoints,
+    queryRect: { x1: selX1, y1: selY1, x2: selX2, y2: selY2 },
+    snapLayoutOverrides,
+    snapWireWaypoints,
+  };
+  renderBoxSelectionHighlight();
+}
+
+function updateModuleClickSelection(instName, additive, fillBox) {
+  if (fillBox) {
+    const clicked = getModuleBoxBounds(instName);
+    if (!clicked) return;
+    const clickedRect = {
+      x1: clicked.x,
+      y1: clicked.y,
+      x2: clicked.x + clicked.width,
+      y2: clicked.y + clicked.height,
+    };
+    const current = state.boxSelection?.queryRect;
+    const clickedAlreadySelected = state.boxSelection?.items?.has(instName);
+    const rect = current
+      ? (clickedAlreadySelected ? current : {
+          x1: Math.min(current.x1, clickedRect.x1),
+          y1: Math.min(current.y1, clickedRect.y1),
+          x2: Math.max(current.x2, clickedRect.x2),
+          y2: Math.max(current.y2, clickedRect.y2),
+        })
+      : clickedRect;
+    setSelectionFromQueryRect(rect);
+    return;
+  }
+  const selected = additive && state.boxSelection?.items
+    ? new Set(state.boxSelection.items)
+    : new Set();
+  if (additive && selected.has(instName)) selected.delete(instName);
+  else selected.add(instName);
+  setModuleSelection(selected);
 }
 
 function finalizeBoxSelection() {
@@ -3541,6 +4238,26 @@ function renderBoxSelectionHighlight() {
   const bx2 = qr.x2 + pad;
   const by2 = qr.y2 + pad;
 
+  // Transparent drag area sits below modules, so selected modules keep click priority.
+  const hitArea = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  hitArea.id = 'box-selection-hit-area';
+  hitArea.setAttribute('x', bx);
+  hitArea.setAttribute('y', by);
+  hitArea.setAttribute('width', bx2 - bx);
+  hitArea.setAttribute('height', by2 - by);
+  hitArea.setAttribute('fill', 'transparent');
+  hitArea.setAttribute('stroke', 'none');
+  hitArea.setAttribute('pointer-events', 'all');
+  hitArea.style.cursor = 'move';
+  hitArea.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    startBoxSelectionDrag(e);
+  });
+  const underModulesAnchor = [...designRoot.children].find(el => el.classList?.contains('module-internal')) || null;
+  designRoot.insertBefore(hitArea, underModulesAnchor);
+
   // Draw selection bounding box
   const selBorder = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
   selBorder.id = 'box-selection-border';
@@ -3553,45 +4270,43 @@ function renderBoxSelectionHighlight() {
   selBorder.setAttribute('stroke-width', 2 / state.zoom);
   selBorder.setAttribute('stroke-dasharray', `${6/state.zoom},${3/state.zoom}`);
   selBorder.setAttribute('rx', 4);
-  selBorder.setAttribute('pointer-events', 'all');
-  selBorder.style.cursor = 'move';
-  selBorder.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
-    e.stopPropagation();
-    e.preventDefault();
-    startBoxSelectionDrag(e);
-  });
+  selBorder.setAttribute('pointer-events', 'none');
   designRoot.appendChild(selBorder);
 
-  // Confirm / Cancel buttons centered above the top border
+  // Convert / Confirm / Cancel buttons centered above the top border
   const ccG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   ccG.id = 'box-selection-confirm-cancel';
   const ccBmx = (bx + bx2) / 2;
   const ccGap = 14 / state.zoom;
-  const ccBtnW = 26 / state.zoom;
+  const ccBtnW = 30 / state.zoom;
   const ccBtnH = 22 / state.zoom;
   const ccSpacing = 6 / state.zoom;
   const ccBtnRx = 4 / state.zoom;
-  const ccFontSize = 13 / state.zoom;
+  const ccFontSize = 12 / state.zoom;
   const ccBtnTop = by - ccGap - ccBtnH;
+  const ccTotalW = ccBtnW * 3 + ccSpacing * 2;
 
-  function _makeCCBtn(x, color, label, onClick) {
+  function _makeCCBtn(x, color, label, action, onClick) {
     const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
     r.setAttribute('x', x); r.setAttribute('y', ccBtnTop);
     r.setAttribute('width', ccBtnW); r.setAttribute('height', ccBtnH);
     r.setAttribute('fill', color); r.setAttribute('stroke', '#0d1117');
     r.setAttribute('stroke-width', 1 / state.zoom); r.setAttribute('rx', ccBtnRx);
+    r.setAttribute('data-action', action);
     r.style.cursor = 'pointer';
     r.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
     const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     t.setAttribute('x', x + ccBtnW / 2); t.setAttribute('y', ccBtnTop + ccBtnH * 0.68);
     t.setAttribute('text-anchor', 'middle'); t.setAttribute('fill', '#fff');
     t.setAttribute('font-size', ccFontSize); t.setAttribute('pointer-events', 'none');
+    t.setAttribute('data-action', action);
     t.textContent = label;
     ccG.appendChild(r); ccG.appendChild(t);
   }
-  _makeCCBtn(ccBmx - ccSpacing / 2 - ccBtnW, '#2ea44f', '✓', confirmBoxSelection);
-  _makeCCBtn(ccBmx + ccSpacing / 2,           '#da3633', '✕', cancelBoxSelection);
+  const ccLeft = ccBmx - ccTotalW / 2;
+  _makeCCBtn(ccLeft, '#1f6feb', '注', 'comment', convertBoxSelectionToCommentBlock);
+  _makeCCBtn(ccLeft + ccBtnW + ccSpacing, '#2ea44f', '✓', 'confirm', confirmBoxSelection);
+  _makeCCBtn(ccLeft + (ccBtnW + ccSpacing) * 2, '#da3633', '✕', 'cancel', cancelBoxSelection);
   designRoot.appendChild(ccG);
 
   // Resize handles — 8 around the border (corners + edge midpoints)
@@ -3634,6 +4349,8 @@ function renderBoxSelectionHighlight() {
 }
 
 function removeBoxSelectionCloseBtn() {
+  const hitArea = document.getElementById('box-selection-hit-area');
+  if (hitArea) hitArea.remove();
   const border = document.getElementById('box-selection-border');
   if (border) border.remove();
   const ccBtns = document.getElementById('box-selection-confirm-cancel');
@@ -3711,6 +4428,13 @@ function _computeResizedRect(origRect, handle, dx, dy) {
 function _updateResizeBorderVisual(x1, y1, x2, y2) {
   const pad = 10;
   const bx = x1 - pad, by = y1 - pad, bx2 = x2 + pad, by2 = y2 + pad;
+  const hitArea = document.getElementById('box-selection-hit-area');
+  if (hitArea) {
+    hitArea.setAttribute('x', bx);
+    hitArea.setAttribute('y', by);
+    hitArea.setAttribute('width', bx2 - bx);
+    hitArea.setAttribute('height', by2 - by);
+  }
   const border = document.getElementById('box-selection-border');
   if (border) {
     border.setAttribute('x', bx);
@@ -3737,14 +4461,20 @@ function _updateResizeBorderVisual(x1, y1, x2, y2) {
   const ccG = document.getElementById('box-selection-confirm-cancel');
   if (ccG) {
     const newBmx = (bx + bx2) / 2;
-    const gap = 14 / state.zoom, btnW = 26 / state.zoom, btnH = 22 / state.zoom, sp = 6 / state.zoom;
+    const gap = 14 / state.zoom, btnW = 30 / state.zoom, btnH = 22 / state.zoom, sp = 6 / state.zoom;
     const btnTop = by - gap - btnH;
+    const totalW = btnW * 3 + sp * 2;
+    const left = newBmx - totalW / 2;
     const rects = ccG.querySelectorAll('rect');
     const texts = ccG.querySelectorAll('text');
-    if (rects[0]) { rects[0].setAttribute('x', newBmx - sp / 2 - btnW); rects[0].setAttribute('y', btnTop); }
-    if (rects[1]) { rects[1].setAttribute('x', newBmx + sp / 2);         rects[1].setAttribute('y', btnTop); }
-    if (texts[0]) { texts[0].setAttribute('x', newBmx - sp / 2 - btnW / 2); texts[0].setAttribute('y', btnTop + btnH * 0.68); }
-    if (texts[1]) { texts[1].setAttribute('x', newBmx + sp / 2 + btnW / 2); texts[1].setAttribute('y', btnTop + btnH * 0.68); }
+    rects.forEach((r, i) => {
+      r.setAttribute('x', left + i * (btnW + sp));
+      r.setAttribute('y', btnTop);
+    });
+    texts.forEach((t, i) => {
+      t.setAttribute('x', left + i * (btnW + sp) + btnW / 2);
+      t.setAttribute('y', btnTop + btnH * 0.68);
+    });
   }
 }
 
@@ -3896,6 +4626,30 @@ function onBoxSelectionDragEnd(e) {
 
 function confirmBoxSelection() {
   clearBoxSelection();
+}
+
+function convertBoxSelectionToCommentBlock() {
+  if (!state.activeTab || !state.boxSelection?.queryRect) return;
+  const qr = state.boxSelection.queryRect;
+  const pad = 10;
+  const id = `comment_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  const customs = normalizeCustomizations(state.customizations[state.activeTab] || {});
+  if (!customs.commentBlocks) customs.commentBlocks = {};
+  customs.commentBlocks[id] = {
+    x: qr.x1 - pad,
+    y: qr.y1 - pad,
+    width: Math.max(80, qr.x2 - qr.x1 + pad * 2),
+    height: Math.max(50, qr.y2 - qr.y1 + pad * 2),
+    title: '注释块',
+    markdown: '## 注释块\n\n在右键设置中编辑 Markdown 内容。',
+  };
+  state.customizations[state.activeTab] = customs;
+  state.activeCommentBlockId = id;
+  saveCustomizations(state.activeTab, customs);
+  scheduleSyncToServer(state.activeTab);
+  clearBoxSelection();
+  renderCanvas();
+  showToast('已转换为注释块', 'success');
 }
 
 function cancelBoxSelection() {
