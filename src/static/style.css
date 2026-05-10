@@ -897,6 +897,117 @@ body {
   color: #8b949e;
 }
 
+/* Persistent comment blocks rendered beneath modules and wires */
+.comment-block-rect {
+  fill: rgba(88, 166, 255, 0.08);
+  stroke: rgba(139, 148, 158, 0.32);
+  stroke-width: 1.2;
+}
+.comment-block.active .comment-block-rect {
+  stroke: rgba(88, 166, 255, 0.45);
+  stroke-width: 1.4;
+}
+.comment-block-body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
+  color: rgba(230, 237, 243, 0.9);
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 600;
+  user-select: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  text-align: center;
+  padding: 10px 8px 6px;
+}
+.comment-block-handle {
+  fill: #58a6ff;
+  stroke: rgba(13, 17, 23, 0.7);
+  stroke-width: 0.8;
+  opacity: 0.28;
+}
+.comment-block-handle:hover { opacity: 0.65; }
+.vv-dark-input,
+.vv-dark-textarea {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #c9d1d9;
+  outline: none;
+  box-sizing: border-box;
+}
+.vv-dark-input {
+  flex: 1;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+.vv-dark-textarea {
+  padding: 9px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+.vv-dark-input:focus,
+.vv-dark-textarea:focus {
+  border-color: #58a6ff;
+}
+
+#load-progress-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(13, 17, 23, 0.56);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+.load-progress-card {
+  width: min(420px, calc(100vw - 40px));
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  padding: 18px 20px;
+}
+.load-progress-title {
+  color: #e6edf3;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.load-progress-message {
+  min-height: 18px;
+  color: #8b949e;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+.load-progress-track {
+  height: 8px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.load-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: #238636;
+  border-radius: 999px;
+  transition: width 0.18s ease;
+}
+.load-progress-percent {
+  margin-top: 8px;
+  text-align: right;
+  color: #6e7681;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
 /* ============================
    Block Design
    ============================ */
@@ -1433,4 +1544,3 @@ select.bd-dark-select option { background: #161b22; color: #c9d1d9; }
   color: #58a6ff;
   border-bottom-color: #58a6ff;
 }
-
