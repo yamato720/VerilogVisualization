@@ -157,6 +157,173 @@ def _detect_active_low(name: str) -> bool:
     return False
 
 
+def _skip_whitespace(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    return pos
+
+
+def _find_matching_parenthesis(text: str, open_pos: int) -> int:
+    """Return the matching closing parenthesis while respecting quoted strings."""
+    depth = 0
+    quote = None
+    escaped = False
+    for pos in range(open_pos, len(text)):
+        char = text[pos]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char == '"':
+            quote = char
+        elif char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+            if depth == 0:
+                return pos
+    return -1
+
+
+def _split_top_level(text: str) -> List[str]:
+    """Split comma-separated values without splitting nested expressions."""
+    values = []
+    start = 0
+    paren_depth = bracket_depth = brace_depth = 0
+    quote = None
+    escaped = False
+    for pos, char in enumerate(text):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char == '"':
+            quote = char
+        elif char == '(':
+            paren_depth += 1
+        elif char == ')':
+            paren_depth -= 1
+        elif char == '[':
+            bracket_depth += 1
+        elif char == ']':
+            bracket_depth -= 1
+        elif char == '{':
+            brace_depth += 1
+        elif char == '}':
+            brace_depth -= 1
+        elif char == ',' and not (paren_depth or bracket_depth or brace_depth):
+            values.append(text[start:pos].strip())
+            start = pos + 1
+    values.append(text[start:].strip())
+    return [value for value in values if value]
+
+
+def _parse_named_arguments(text: str) -> Dict[str, str]:
+    """Parse .name(expression) arguments with nested expressions."""
+    values = {}
+    pos = 0
+    identifier = re.compile(r'\w+')
+    while pos < len(text):
+        pos = _skip_whitespace(text, pos)
+        if pos < len(text) and text[pos] == ',':
+            pos += 1
+            continue
+        if pos >= len(text) or text[pos] != '.':
+            break
+        name_match = identifier.match(text, pos + 1)
+        if not name_match:
+            break
+        pos = _skip_whitespace(text, name_match.end())
+        if pos >= len(text) or text[pos] != '(':
+            break
+        close_pos = _find_matching_parenthesis(text, pos)
+        if close_pos < 0:
+            break
+        values[name_match.group()] = text[pos + 1:close_pos].strip()
+        pos = close_pos + 1
+    return values
+
+
+def _parse_instances(body_text: str) -> List[VerilogInstance]:
+    """Extract named-port module instances with a single forward scan."""
+    instances = []
+    header_pattern = re.compile(r'\b(\w+)\s+')
+    identifier = re.compile(r'\w+')
+    keywords = {
+        'assign', 'always', 'always_comb', 'always_ff', 'always_latch', 'initial',
+        'wire', 'reg', 'logic', 'bit', 'input', 'output', 'inout', 'parameter',
+        'localparam', 'integer', 'real', 'genvar', 'generate', 'endgenerate',
+        'if', 'else', 'case', 'casez', 'casex', 'endcase', 'for', 'foreach',
+        'while', 'repeat', 'begin', 'end', 'function', 'endfunction', 'task',
+        'endtask', 'import', 'signed', 'unsigned', 'typedef', 'struct', 'union',
+        'enum', 'return', 'module', 'endmodule',
+    }
+    search_pos = 0
+
+    while True:
+        header_match = header_pattern.search(body_text, search_pos)
+        if not header_match:
+            break
+        module_type = header_match.group(1)
+        if module_type in keywords:
+            search_pos = header_match.end()
+            continue
+
+        pos = header_match.end()
+        param_text = ''
+        if pos < len(body_text) and body_text[pos] == '#':
+            pos = _skip_whitespace(body_text, pos + 1)
+            if pos >= len(body_text) or body_text[pos] != '(':
+                search_pos = header_match.end()
+                continue
+            parameter_close = _find_matching_parenthesis(body_text, pos)
+            if parameter_close < 0:
+                search_pos = header_match.end()
+                continue
+            param_text = body_text[pos + 1:parameter_close]
+            pos = _skip_whitespace(body_text, parameter_close + 1)
+
+        instance_match = identifier.match(body_text, pos)
+        if not instance_match:
+            search_pos = header_match.end()
+            continue
+        instance_name = instance_match.group()
+        pos = _skip_whitespace(body_text, instance_match.end())
+        if pos >= len(body_text) or body_text[pos] != '(':
+            search_pos = header_match.end()
+            continue
+        connection_close = _find_matching_parenthesis(body_text, pos)
+        if connection_close < 0:
+            search_pos = header_match.end()
+            continue
+
+        after_connection = _skip_whitespace(body_text, connection_close + 1)
+        if after_connection >= len(body_text) or body_text[after_connection] != ';':
+            search_pos = header_match.end()
+            continue
+
+        params = _parse_named_arguments(param_text)
+        if param_text and not params:
+            params = {
+                f'param_{index}': value
+                for index, value in enumerate(_split_top_level(param_text))
+            }
+        connections = _parse_named_arguments(body_text[pos + 1:connection_close])
+        if connections:
+            instances.append(VerilogInstance(module_type, instance_name, connections, params))
+        search_pos = after_connection + 1
+
+    return instances
+
+
 def parse_verilog_file(filepath: str) -> List[VerilogModule]:
     """Parse a single Verilog file and return list of modules found."""
     with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
@@ -263,59 +430,7 @@ def parse_verilog_file(filepath: str) -> List[VerilogModule]:
                     is_reg=(kw == 'reg'), arr_msb=arr_msb, arr_lsb=arr_lsb
                 ))
 
-        # Parse module instantiations
-        # Pattern: ModuleName [#(...)] instance_name ( .port(signal), ... );
-        inst_pattern = re.compile(
-            r'(\w+)\s+'                        # module type
-            r'(?:#\s*\(([^)]*)\)\s+)?'         # optional parameters
-            r'(\w+)\s*'                        # instance name
-            r'\(\s*'                           # opening paren
-            r'((?:\s*\.\w+\s*\([^)]*\)\s*,?\s*)*)'  # named port connections
-            r'\s*\)\s*;',                      # closing paren
-            re.DOTALL
-        )
-
-        # Keywords that look like instantiations but aren't
-        keywords = {
-            'assign', 'always', 'initial', 'wire', 'reg', 'input', 'output',
-            'inout', 'parameter', 'localparam', 'integer', 'real', 'genvar',
-            'generate', 'endgenerate', 'if', 'else', 'case', 'endcase',
-            'for', 'while', 'begin', 'end', 'function', 'endfunction',
-            'task', 'endtask', 'import', 'signed', 'unsigned',
-        }
-
-        for im in inst_pattern.finditer(body_text):
-            mod_type = im.group(1)
-            if mod_type in keywords:
-                continue
-
-            param_text_inst = im.group(2) or ''
-            inst_name = im.group(3)
-            conn_text = im.group(4) or ''
-
-            # Parse parameter values
-            params = {}
-            if param_text_inst:
-                pp = re.compile(r'\.(\w+)\s*\(([^)]*)\)')
-                for ppm in pp.finditer(param_text_inst):
-                    params[ppm.group(1)] = ppm.group(2).strip()
-                if not params:
-                    # Positional parameters
-                    vals = [v.strip() for v in param_text_inst.split(',')]
-                    for idx, v in enumerate(vals):
-                        params[f'param_{idx}'] = v
-
-            # Parse connections
-            connections = {}
-            conn_pattern = re.compile(r'\.(\w+)\s*\(([^)]*)\)')
-            for cm in conn_pattern.finditer(conn_text):
-                port_name = cm.group(1)
-                signal = cm.group(2).strip()
-                connections[port_name] = signal
-
-            if connections:  # Only add if it has named connections (likely a real instantiation)
-                instance = VerilogInstance(mod_type, inst_name, connections, params)
-                module.instances.append(instance)
+        module.instances.extend(_parse_instances(body_text))
 
         # Parse assign statements
         # Pattern: assign target = source;
@@ -526,16 +641,38 @@ def analyze_and_save(source_path: str, data_dir: str, save_name_override: str = 
     save_name = candidate
     save_path = candidate_path
 
+    saved_ui_state = {}
+    if save_name_override and os.path.exists(save_path):
+        try:
+            with open(save_path, 'r', encoding='utf-8') as saved_file:
+                previous_design = json.load(saved_file)
+            for key in (
+                'layout', 'wire_waypoints', 'view_state', 'customizations',
+                'tree_expanded', 'sidebar_ui', 'canvas_controls', 'server_sync_enabled',
+            ):
+                if key in previous_design:
+                    saved_ui_state[key] = previous_design[key]
+        except (OSError, json.JSONDecodeError):
+            pass
+
     # Build an ordered dict so metadata appears at the top of the JSON file,
     # making source_path / save_path easy to locate without scrolling past
     # the (potentially huge) modules block.
     ordered_result = {
         'source_path': result['source_path'],
         'save_path':   save_path,
+    }
+    if 'server_sync_enabled' in saved_ui_state:
+        ordered_result['server_sync_enabled'] = saved_ui_state['server_sync_enabled']
+    ordered_result.update({
         'source_files': result['source_files'],
         'top_modules':  result['top_modules'],
         'modules':      result['modules'],
-    }
+    })
+    ordered_result.update({
+        key: value for key, value in saved_ui_state.items()
+        if key != 'server_sync_enabled'
+    })
 
     with open(save_path, 'w', encoding='utf-8') as f:
         json.dump(ordered_result, f, indent=2, ensure_ascii=False)

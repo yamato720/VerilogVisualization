@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verilog 可视化布局"
+  short_description: "按 RTL 数据流重排设计图并保护 JSON 状态"
+  default_prompt: "使用 $verilog-visualization-layout 检查 Verilog 可视化 JSON，并按 RTL 数据流重排模块。"

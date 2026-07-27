@@ -211,6 +211,79 @@ body {
   margin-bottom: 8px;
   letter-spacing: 0.5px;
 }
+.server-sync-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #8b949e;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 16px;
+  user-select: none;
+}
+.design-state-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.sidebar-section > .sidebar-section-header > h3 {
+  margin-bottom: 0;
+}
+.design-state-save {
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  background: transparent;
+  color: #8b949e;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 5px;
+}
+.design-state-save:hover:not(:disabled) {
+  border-color: #58a6ff;
+  color: #c9d1d9;
+}
+.design-state-save:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.server-sync-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.server-sync-slider {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  border: 1px solid #484f58;
+  border-radius: 8px;
+  background: #21262d;
+  transition: background 0.15s, border-color 0.15s;
+}
+.server-sync-slider::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #8b949e;
+  content: '';
+  transition: transform 0.15s, background 0.15s;
+}
+.server-sync-toggle input:checked + .server-sync-slider {
+  border-color: #1f6feb;
+  background: #1f6feb;
+}
+.server-sync-toggle input:checked + .server-sync-slider::after {
+  transform: translateX(12px);
+  background: #fff;
+}
+.server-sync-toggle input:focus-visible + .server-sync-slider {
+  outline: 2px solid #58a6ff;
+  outline-offset: 2px;
+}
 
 .open-buttons { display: flex; }
 .open-buttons .btn-primary { flex: 1; text-align: center; }

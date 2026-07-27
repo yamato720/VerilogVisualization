@@ -51,7 +51,17 @@
 
   <!-- Saved Designs -->
   <div class="sidebar-section">
-    <h3>已保存设计</h3>
+    <div class="sidebar-section-header">
+      <h3>已保存设计</h3>
+      <div class="design-state-controls">
+        <button id="btn-save-design-state" class="design-state-save" onclick="saveCurrentDesignState()" title="将当前布局和视图保存到设计 JSON">保存</button>
+        <label class="server-sync-toggle" title="实时将后续编辑写入设计 JSON">
+          <span class="server-sync-label">同步</span>
+          <input id="server-sync-toggle" type="checkbox" onchange="setServerSyncEnabled(this.checked)" aria-label="实时同步设计 JSON">
+          <span class="server-sync-slider" aria-hidden="true"></span>
+        </label>
+      </div>
+    </div>
     <div id="design-list" class="design-list"></div>
   </div>
 
