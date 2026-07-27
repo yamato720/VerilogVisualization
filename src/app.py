@@ -9,6 +9,7 @@ import json
 import io
 import re
 import subprocess
+import heapq
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory
 from verilog_parser import analyze_and_save, parse_verilog_file, parse_verilog_folder, build_hierarchy
 from chisel_parser import (
@@ -31,6 +32,61 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 app = Flask(__name__, template_folder=TEMPLATE_DIR, static_folder=STATIC_DIR)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # Disable static file caching during dev
+
+
+VERILOG_SUFFIXES = ('.v', '.sv', '.vh')
+RTL_DISCOVERY_LIMIT = 512
+
+
+def contains_verilog_files(directory):
+    try:
+        with os.scandir(directory) as entries:
+            return any(
+                entry.is_file() and entry.name.endswith(VERILOG_SUFFIXES)
+                for entry in entries
+            )
+    except PermissionError:
+        return False
+
+
+def analysis_source_path(source_path):
+    """Find a compact RTL source directory without assuming a project layout."""
+    if not os.path.isdir(source_path):
+        return source_path, None
+
+    if contains_verilog_files(source_path):
+        return source_path, None
+
+    queue = [(0, 1, source_path)]
+    fallback = None
+    searched = 0
+    while queue and searched < RTL_DISCOVERY_LIMIT:
+        depth, _, directory = heapq.heappop(queue)
+        searched += 1
+
+        if contains_verilog_files(directory):
+            if os.path.basename(directory).lower() == 'rtl':
+                return directory, f'已自动找到 RTL 目录：{directory}'
+            if fallback is None:
+                fallback = directory
+            continue
+
+        try:
+            with os.scandir(directory) as entries:
+                children = [
+                    entry.path for entry in entries
+                    if entry.is_dir(follow_symlinks=False) and not entry.name.startswith('.')
+                ]
+        except PermissionError:
+            continue
+
+        for child in children:
+            name = os.path.basename(child).lower()
+            heapq.heappush(queue, (depth + 1, 0 if name == 'rtl' else 1, child))
+
+    if fallback:
+        return fallback, f'已自动找到 Verilog 目录：{fallback}'
+    return source_path, None
 
 
 @app.route('/')
@@ -108,6 +164,8 @@ def analyze():
     if not os.path.exists(source_path):
         return jsonify({'error': f'Path not found: {source_path}'}), 404
 
+    source_path, analysis_notice = analysis_source_path(source_path)
+
     try:
         result = analyze_and_save(source_path, DATA_DIR)
         return jsonify({
@@ -115,6 +173,8 @@ def analyze():
             'saved_as': result['saved_as'],
             'top_modules': result['top_modules'],
             'module_count': len(result['modules']),
+            'analysis_path': source_path,
+            'analysis_notice': analysis_notice,
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -300,7 +360,7 @@ def save_state():
         return jsonify({'error': 'Design not found'}), 404
     with open(json_path, 'r', encoding='utf-8') as f:
         design_data = json.load(f)
-    for key in ('layout', 'wire_waypoints', 'view_state', 'customizations', 'tree_expanded', 'sidebar_ui', 'canvas_controls'):
+    for key in ('layout', 'wire_waypoints', 'view_state', 'customizations', 'tree_expanded', 'sidebar_ui', 'canvas_controls', 'server_sync_enabled'):
         if key in data:
             design_data[key] = data[key]
     with open(json_path, 'w', encoding='utf-8') as f:

@@ -242,6 +242,9 @@ function renderModuleBox(mod, x, y, opts = {}) {
   }
 
   const portPositions = {};  // portName -> { x (abs), y (abs), side }
+  // Stable only while a port group remains in its current collapsed/expanded state.
+  // It lets the internal renderer collapse many bit-level dependencies into one visible bus.
+  const portGroupIds = {};   // portName -> "in|out:<group label or port name>"
   let curY = LAYOUT.MODULE_HEADER_H + LAYOUT.PORT_GAP * 2;
 
   // ── Draw port groups helper ──
@@ -316,6 +319,7 @@ function renderModuleBox(mod, x, y, opts = {}) {
 
         // Register port positions for all ports in group at this Y
         group.ports.forEach(p => {
+          portGroupIds[p.name] = `${side}:${group.label}`;
           portPositions[p.name] = {
             x: x + (isLeft ? -LAYOUT.PORT_STUB : W + LAYOUT.PORT_STUB),
             y: y + midY,
@@ -415,6 +419,7 @@ function renderModuleBox(mod, x, y, opts = {}) {
           }
 
           g.appendChild(portG);
+          portGroupIds[port.name] = `${side}:${port.name}`;
           portPositions[port.name] = {
             x: x + (isLeft ? -LAYOUT.PORT_STUB : W + LAYOUT.PORT_STUB),
             y: y + midY,
@@ -445,71 +450,211 @@ function renderModuleBox(mod, x, y, opts = {}) {
   // Drag handle (header area) - mark for identification
   g.querySelector('.module-rect').setAttribute('data-drag-target', 'true');
 
-  return { group: g, portPositions, size: { width: W, height: H } };
+  return { group: g, portPositions, portGroupIds, size: { width: W, height: H } };
 }
 
 // ─── Wire drawing with orthogonal routing & waypoints ──────────────────
 
+function wireLead(x, y, side) {
+  const clearance = LAYOUT.WIRE_MARGIN + 8;
+  return { x: side === 'left' ? x - clearance : x + clearance, y };
+}
+
+function uniqueSorted(values) {
+  return [...new Set(values)].sort((left, right) => left - right);
+}
+
+function pointBlocked(point, obstacles) {
+  const margin = LAYOUT.WIRE_MARGIN;
+  return obstacles.some(obstacle => {
+    const left = obstacle.x - margin;
+    const right = obstacle.x + obstacle.w + margin;
+    const top = obstacle.y - margin;
+    const bottom = obstacle.y + obstacle.h + margin;
+    return point.x > left && point.x < right && point.y > top && point.y < bottom;
+  });
+}
+
+function segmentBlocked(from, to, obstacles) {
+  const margin = LAYOUT.WIRE_MARGIN;
+  return obstacles.some(obstacle => {
+    const left = obstacle.x - margin;
+    const right = obstacle.x + obstacle.w + margin;
+    const top = obstacle.y - margin;
+    const bottom = obstacle.y + obstacle.h + margin;
+    if (from.x === to.x) {
+      return from.x > left && from.x < right
+        && Math.max(from.y, to.y) > top && Math.min(from.y, to.y) < bottom;
+    }
+    return from.y > top && from.y < bottom
+      && Math.max(from.x, to.x) > left && Math.min(from.x, to.x) < right;
+  });
+}
+
 /**
- * Build path through waypoints with orthogonal segments.
- * waypoints: array of {x, y} user-defined control points (can be empty).
- * obstacles: array of {x, y, w, h} module bounding boxes.
+ * Find an obstacle-free Manhattan path on the module-edge visibility grid.
+ * The returned points contain both endpoints and never traverse a module body.
  */
-function buildWirePath(x1, y1, x2, y2, waypoints, wireIdx, totalWires, obstacles) {
-  const spread = 6;
-  const offset = (wireIdx - (totalWires - 1) / 2) * spread;
+function findOrthogonalPath(start, end, obstacles) {
+  if (start.x === end.x && start.y === end.y) return [start];
+  if (pointBlocked(start, obstacles) || pointBlocked(end, obstacles)) return null;
 
-  // If user has defined waypoints, route through them with orthogonal segments
-  if (waypoints && waypoints.length > 0) {
-    const pts = [{ x: x1, y: y1 }, ...waypoints, { x: x2, y: y2 }];
-    let d = `M${pts[0].x},${pts[0].y}`;
-    for (let i = 1; i < pts.length; i++) {
-      const prev = pts[i - 1];
-      const cur = pts[i];
-      // Orthogonal: go horizontal first, then vertical
-      d += ` L${cur.x},${prev.y} L${cur.x},${cur.y}`;
+  const margin = LAYOUT.WIRE_MARGIN;
+  const clearance = margin + 40;
+  const bounds = obstacles.reduce((acc, obstacle) => ({
+    minX: Math.min(acc.minX, obstacle.x - margin),
+    maxX: Math.max(acc.maxX, obstacle.x + obstacle.w + margin),
+    minY: Math.min(acc.minY, obstacle.y - margin),
+    maxY: Math.max(acc.maxY, obstacle.y + obstacle.h + margin),
+  }), {
+    minX: Math.min(start.x, end.x), maxX: Math.max(start.x, end.x),
+    minY: Math.min(start.y, end.y), maxY: Math.max(start.y, end.y),
+  });
+  const xs = uniqueSorted([
+    start.x, end.x, bounds.minX - clearance, bounds.maxX + clearance,
+    ...obstacles.flatMap(obstacle => [obstacle.x - margin, obstacle.x + obstacle.w + margin]),
+  ]);
+  const ys = uniqueSorted([
+    start.y, end.y, bounds.minY - clearance, bounds.maxY + clearance,
+    ...obstacles.flatMap(obstacle => [obstacle.y - margin, obstacle.y + obstacle.h + margin]),
+  ]);
+  const width = xs.length;
+  const nodeCount = width * ys.length;
+  const nodeAt = (xIndex, yIndex) => yIndex * width + xIndex;
+  const pointAt = node => ({ x: xs[node % width], y: ys[Math.floor(node / width)] });
+  const startNode = nodeAt(xs.indexOf(start.x), ys.indexOf(start.y));
+  const endNode = nodeAt(xs.indexOf(end.x), ys.indexOf(end.y));
+  if (startNode < 0 || endNode < 0) return null;
+
+  const stateCount = nodeCount * 5;
+  const distances = new Array(stateCount).fill(Infinity);
+  const previous = new Array(stateCount).fill(-1);
+  const startState = startNode * 5 + 4;
+  distances[startState] = 0;
+  const heap = [];
+  const push = item => {
+    heap.push(item);
+    let index = heap.length - 1;
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (heap[parent].cost <= item.cost) break;
+      heap[index] = heap[parent];
+      index = parent;
     }
-    return d;
-  }
-
-  // Auto-routing with obstacle avoidance
-  const y1o = y1 + offset;
-  const y2o = y2 + offset;
-  const dx = x2 - x1;
-
-  // Simple orthogonal routing (enhanced with obstacle check)
-  let midX;
-  if (dx > 60) {
-    midX = x1 + dx * 0.4;
-  } else if (dx > 0) {
-    midX = x1 + dx / 2;
-  } else {
-    midX = Math.max(x1, x2) + 60;
-  }
-  midX += offset;
-
-  if (Math.abs(y1 - y2) < 4 && dx > 0) {
-    return `M${x1},${y1} L${x2},${y2}`;
-  }
-
-  if (dx < -20) {
-    const loopOut = 40 + Math.abs(offset);
-    // Check if the straight-up route hits an obstacle
-    const routeX = x1 + loopOut;
-    if (obstacles && obstacles.length > 0) {
-      const rerouted = avoidObstaclesVertical(x1, y1, x2, y2, routeX, obstacles, offset);
-      if (rerouted) return rerouted;
+    heap[index] = item;
+  };
+  const pop = () => {
+    if (heap.length === 0) return null;
+    const root = heap[0];
+    const last = heap.pop();
+    if (heap.length > 0) {
+      let index = 0;
+      while (true) {
+        let child = index * 2 + 1;
+        if (child >= heap.length) break;
+        if (child + 1 < heap.length && heap[child + 1].cost < heap[child].cost) child += 1;
+        if (heap[child].cost >= last.cost) break;
+        heap[index] = heap[child];
+        index = child;
+      }
+      heap[index] = last;
     }
-    return `M${x1},${y1} L${routeX},${y1} L${routeX},${y2o} L${x2},${y2}`;
+    return root;
+  };
+  push({ state: startState, cost: 0 });
+
+  const directions = [
+    [1, 0], [-1, 0], [0, 1], [0, -1],
+  ];
+  let finalState = -1;
+  while (heap.length > 0) {
+    const current = pop();
+    if (current.cost !== distances[current.state]) continue;
+    const node = Math.floor(current.state / 5);
+    const previousDirection = current.state % 5;
+    if (node === endNode) {
+      finalState = current.state;
+      break;
+    }
+    const xIndex = node % width;
+    const yIndex = Math.floor(node / width);
+    directions.forEach(([dx, dy], direction) => {
+      const nextX = xIndex + dx;
+      const nextY = yIndex + dy;
+      if (nextX < 0 || nextX >= width || nextY < 0 || nextY >= ys.length) return;
+      const nextNode = nodeAt(nextX, nextY);
+      const from = pointAt(node);
+      const to = pointAt(nextNode);
+      if (pointBlocked(to, obstacles) || segmentBlocked(from, to, obstacles)) return;
+      const bendPenalty = previousDirection === 4 || previousDirection === direction ? 0 : 24;
+      const nextState = nextNode * 5 + direction;
+      const cost = current.cost + Math.abs(to.x - from.x) + Math.abs(to.y - from.y) + bendPenalty;
+      if (cost >= distances[nextState]) return;
+      distances[nextState] = cost;
+      previous[nextState] = current.state;
+      push({ state: nextState, cost });
+    });
+  }
+  if (finalState < 0) return null;
+
+  const nodes = [];
+  for (let state = finalState; state >= 0; state = previous[state]) {
+    nodes.push(Math.floor(state / 5));
+  }
+  return nodes.reverse().map(pointAt);
+}
+
+function appendPathPoints(target, points) {
+  points.forEach(point => {
+    const previous = target[target.length - 1];
+    if (!previous || previous.x !== point.x || previous.y !== point.y) target.push(point);
+  });
+}
+
+/**
+ * Route every wire from an output-side lead to an input-side lead.  Manual
+ * waypoints are mandatory anchors, while the segments between them remain
+ * obstacle-aware so they cannot disappear beneath an unrelated module.
+ */
+function buildWirePath(x1, y1, x2, y2, waypoints, wireIdx, totalWires, obstacles, sourceSide = 'right', targetSide = 'left') {
+  const source = { x: x1, y: y1 };
+  const target = { x: x2, y: y2 };
+  const sourceLead = wireLead(x1, y1, sourceSide);
+  const targetLead = wireLead(x2, y2, targetSide);
+  const offset = (wireIdx - (totalWires - 1) / 2) * 12;
+  const anchors = [sourceLead, ...(waypoints || []), targetLead];
+
+  // Feedback must leave the right-side output and return to the left-side input
+  // through a lower rail, never by approaching the input from its output side.
+  if ((!waypoints || waypoints.length === 0) && targetLead.x <= sourceLead.x) {
+    const bottom = Math.max(
+      sourceLead.y,
+      targetLead.y,
+      ...obstacles.map(obstacle => obstacle.y + obstacle.h + LAYOUT.WIRE_MARGIN),
+    ) + 40 + Math.abs(offset);
+    anchors.splice(1, 0,
+      { x: sourceLead.x, y: bottom },
+      { x: targetLead.x, y: bottom },
+    );
   }
 
-  // Normal orthogonal - check for obstacles in the path
-  if (obstacles && obstacles.length > 0) {
-    const rerouted = avoidObstaclesSimple(x1, y1, x2, y2, midX, obstacles, offset);
-    if (rerouted) return rerouted;
+  const points = [source];
+  appendPathPoints(points, [sourceLead]);
+  for (let index = 1; index < anchors.length; index += 1) {
+    const route = findOrthogonalPath(anchors[index - 1], anchors[index], obstacles);
+    if (route) {
+      appendPathPoints(points, route.slice(1));
+    } else {
+      // The visibility grid should always find a route. Keep an orthogonal
+      // fallback for malformed manual waypoints instead of emitting diagonals.
+      appendPathPoints(points, [
+        { x: anchors[index - 1].x, y: anchors[index].y },
+        anchors[index],
+      ]);
+    }
   }
-
-  return `M${x1},${y1} L${midX},${y1} L${midX},${y2} L${x2},${y2}`;
+  appendPathPoints(points, [target]);
+  return points.map((point, index) => `${index === 0 ? 'M' : 'L'}${point.x},${point.y}`).join(' ');
 }
 
 /**
@@ -609,14 +754,17 @@ function avoidObstaclesVertical(x1, y1, x2, y2, routeX, obstacles, offset) {
   return null;
 }
 
-function drawWire(x1, y1, x2, y2, isBus, signalName, wireIdx, totalWires, wireKey, waypoints, obstacles, customColor) {
+function drawWire(x1, y1, x2, y2, isBus, signalName, wireIdx, totalWires, wireKey, waypoints, obstacles, customColor, sourceSide, targetSide) {
   const g = svgEl('g', {
     class: 'wire-group',
     'data-signal': signalName,
     'data-wire-key': wireKey || '',
   });
 
-  const d = buildWirePath(x1, y1, x2, y2, waypoints, wireIdx, totalWires, obstacles);
+  const d = buildWirePath(
+    x1, y1, x2, y2, waypoints, wireIdx, totalWires, obstacles,
+    sourceSide, targetSide,
+  );
 
   const path = svgEl('path', {
     class: 'wire-path' + (isBus ? ' bus' : ''),
@@ -733,6 +881,7 @@ function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsed
     moduleLayer.appendChild(r.group);
     renders[item.instance.instance_name] = {
       portPositions: r.portPositions,
+      portGroupIds: r.portGroupIds,
       instance: item.instance,
       mod: item.mod,
       x: ix, y: iy, size: r.size,
@@ -761,7 +910,7 @@ function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsed
       if (!wireToInstPort[cleanWire]) wireToInstPort[cleanWire] = [];
       wireToInstPort[cleanWire].push({
         inst: instName, port: portName, dir: portDef.direction,
-        pos, portDef
+        pos, portDef, portGroupId: render.portGroupIds[portName] || portName,
       });
     }
   });
@@ -906,6 +1055,21 @@ function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsed
     ? allWires.filter(w => !clockResetPattern.test(w.signal) && !clockResetPattern.test(w.out.port) && !clockResetPattern.test(w.inp.port))
     : allWires;
 
+  // Ports in a collapsed group intentionally share one visible endpoint.  Drawing
+  // every scalar dependency there produces an unreadable stack of coincident wires,
+  // so render the group as one bus. Expanding either group restores per-port wires.
+  const bundledWires = new Map();
+  filteredWires.forEach(w => {
+    const key = `${w.out.inst}:${w.out.portGroupId}→${w.inp.inst}:${w.inp.portGroupId}`;
+    let bundle = bundledWires.get(key);
+    if (!bundle) {
+      bundle = { ...w, members: [] };
+      bundledWires.set(key, bundle);
+    }
+    bundle.members.push(w);
+  });
+  const visibleWires = [...bundledWires.values()];
+
   // ── Draw wires with obstacle avoidance ──
   // Build obstacle list from rendered module bounding boxes
   const obstacles = [];
@@ -922,12 +1086,12 @@ function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsed
   const wireCountByPair = {};
   const wireIdxByPair = {};
 
-  filteredWires.forEach(w => {
+  visibleWires.forEach(w => {
     const pairKey = `${w.out.inst}→${w.inp.inst}`;
     wireCountByPair[pairKey] = (wireCountByPair[pairKey] || 0) + 1;
   });
 
-  filteredWires.forEach(w => {
+  visibleWires.forEach(w => {
     const pairKey = `${w.out.inst}→${w.inp.inst}`;
     const idx = wireIdxByPair[pairKey] || 0;
     wireIdxByPair[pairKey] = idx + 1;
@@ -937,15 +1101,16 @@ function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsed
     const wireKey = `${w.out.inst}.${w.out.port}→${w.inp.inst}.${w.inp.port}`;
     const waypoints = wireWaypoints?.[wireKey] || [];
     const customWireColor = customizations.wires?.[wireKey]?.color || null;
-
-    // Filter obstacles: exclude the source and target modules
-    const filteredObs = obstacles.filter(o => o.inst !== w.out.inst && o.inst !== w.inp.inst);
+    const signalName = w.members.length > 1
+      ? `${w.signal} 等 ${w.members.length} 条信号`
+      : w.signal;
 
     const wire = drawWire(
       w.out.pos.x, w.out.pos.y,
       w.inp.pos.x, w.inp.pos.y,
-      w.isBus, w.signal, idx, total,
-      wireKey, waypoints, filteredObs, customWireColor
+      w.isBus || w.members.length > 1, signalName, idx, total,
+      wireKey, waypoints, obstacles, customWireColor,
+      w.out.pos.side, w.inp.pos.side,
     );
     wireLayer.appendChild(wire);
   });

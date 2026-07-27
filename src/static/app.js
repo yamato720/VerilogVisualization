@@ -9,20 +9,21 @@ const STORAGE_KEY_PREFIX = 'vviz_layout_';
 const STORAGE_COLLAPSED_KEY = 'vviz_collapsed';
 const STORAGE_WIRE_KEY_PREFIX = 'vviz_wires_';
 const STORAGE_VIEW_KEY_PREFIX = 'vviz_view_';
+const DEFAULT_SERVER_SYNC_ENABLED = true;
 
-function saveLayout(designName, layoutData) {
+function saveLayout(designName, layoutData, { sync = true } = {}) {
   try { localStorage.setItem(STORAGE_KEY_PREFIX + designName, JSON.stringify(layoutData)); }
   catch (e) { console.warn('Failed to save layout', e); }
-  scheduleSyncToServer(designName);
+  if (sync) scheduleSyncToServer(designName);
 }
 function loadLayout(designName) {
   try { const d = localStorage.getItem(STORAGE_KEY_PREFIX + designName); return d ? JSON.parse(d) : {}; }
   catch (e) { return {}; }
 }
-function saveWireWaypoints(designName, data) {
+function saveWireWaypoints(designName, data, { sync = true } = {}) {
   try { localStorage.setItem(STORAGE_WIRE_KEY_PREFIX + designName, JSON.stringify(data)); }
   catch (e) {}
-  scheduleSyncToServer(designName);
+  if (sync) scheduleSyncToServer(designName);
 }
 function loadWireWaypoints(designName) {
   try { const d = localStorage.getItem(STORAGE_WIRE_KEY_PREFIX + designName); return d ? JSON.parse(d) : {}; }
@@ -36,10 +37,10 @@ function loadCollapsedState() {
   try { const d = localStorage.getItem(STORAGE_COLLAPSED_KEY); return d ? JSON.parse(d) : {}; }
   catch (e) { return {}; }
 }
-function saveViewState(designName, view) {
+function saveViewState(designName, view, { sync = true } = {}) {
   try { localStorage.setItem(STORAGE_VIEW_KEY_PREFIX + designName, JSON.stringify(view)); }
   catch (e) {}
-  scheduleSyncToServer(designName);
+  if (sync) scheduleSyncToServer(designName);
 }
 function loadViewState(designName) {
   try { const d = localStorage.getItem(STORAGE_VIEW_KEY_PREFIX + designName); return d ? JSON.parse(d) : null; }
@@ -100,20 +101,36 @@ function loadCommentPopupSize() {
   catch(e) { return { w: 340, h: 260 }; }
 }
 
-// ─── Server state sync (debounced) ──────────────────────────────────────
-// Persists layout/waypoints/view/customizations into the server-side JSON
-// so the file is self-contained and portable (copy/share).
-
+// ─── 服务器状态同步（防抖） ─────────────────────────────────────────────
 const _syncTimers = {};
-function scheduleSyncToServer(designName) {
-  if (!designName) return;
-  clearTimeout(_syncTimers[designName]);
-  _syncTimers[designName] = setTimeout(() => syncStateToServer(designName), 1500);
+const _syncControllers = {};
+
+function isServerSyncEnabled(designName) {
+  if (!designName) return DEFAULT_SERVER_SYNC_ENABLED;
+  return state.serverSyncEnabled[designName] ?? DEFAULT_SERVER_SYNC_ENABLED;
 }
 
-function syncStateToServer(designName) {
-  if (!designName) return;
-  // Use current in-memory pan/zoom if this is the active tab, otherwise fall back to localStorage
+function cancelScheduledServerSync(designName) {
+  const timer = _syncTimers[designName];
+  if (timer) clearTimeout(timer);
+  delete _syncTimers[designName];
+
+  const controller = _syncControllers[designName];
+  if (controller) controller.abort();
+  delete _syncControllers[designName];
+}
+
+function scheduleSyncToServer(designName) {
+  if (!designName || !isServerSyncEnabled(designName)) return;
+  cancelScheduledServerSync(designName);
+  _syncTimers[designName] = setTimeout(() => {
+    delete _syncTimers[designName];
+    syncStateToServer(designName).catch(() => {});
+  }, 1500);
+}
+
+function syncStateToServer(designName, { force = false } = {}) {
+  if (!designName || (!force && !isServerSyncEnabled(designName))) return Promise.resolve(null);
   const viewState = (state.activeTab === designName && state.pan)
     ? { pan: { ...state.pan }, zoom: state.zoom }
     : (loadViewState(designName) || undefined);
@@ -143,13 +160,79 @@ function syncStateToServer(designName) {
       tree_full_key:  state.canvasControls.treeFullKey,
       fullscreen_key: state.canvasControls.fullscreenKey,
     },
+    server_sync_enabled: isServerSyncEnabled(designName),
   };
   if (viewState) payload.view_state = viewState;
-  fetch('/api/save_state', {
+  const controller = new AbortController();
+  _syncControllers[designName] = controller;
+  return fetch('/api/save_state', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  }).catch(() => {});
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  }).then(async response => {
+    if (!response.ok) throw new Error(`保存失败 (${response.status})`);
+    return response.json();
+  }).finally(() => {
+    if (_syncControllers[designName] === controller) delete _syncControllers[designName];
+  });
+}
+
+function updateServerSyncControls() {
+  const toggle = $('server-sync-toggle');
+  const saveButton = $('btn-save-design-state');
+  const designName = state.activeTab;
+  const enabled = isServerSyncEnabled(designName);
+  if (toggle) {
+    toggle.checked = enabled;
+    toggle.disabled = !designName;
+    toggle.parentElement.title = designName
+      ? '实时将后续编辑写入设计 JSON'
+      : '打开设计后可设置实时同步';
+  }
+  if (saveButton) saveButton.disabled = !designName;
+}
+
+async function setServerSyncEnabled(enabled) {
+  const designName = state.activeTab;
+  if (!designName) {
+    updateServerSyncControls();
+    return;
+  }
+
+  const previous = isServerSyncEnabled(designName);
+  state.serverSyncEnabled[designName] = Boolean(enabled);
+  cancelScheduledServerSync(designName);
+  updateServerSyncControls();
+
+  try {
+    const response = await fetch('/api/save_state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: designName, server_sync_enabled: Boolean(enabled) }),
+    });
+    if (!response.ok) throw new Error(`保存失败 (${response.status})`);
+    showToast(
+      enabled ? '实时同步已开启' : '实时同步已关闭，后续编辑不会写入 JSON',
+      enabled ? 'info' : 'success'
+    );
+  } catch (error) {
+    state.serverSyncEnabled[designName] = previous;
+    updateServerSyncControls();
+    showToast('同步设置保存失败: ' + error.message, 'error');
+  }
+}
+
+async function saveCurrentDesignState() {
+  const designName = state.activeTab;
+  if (!designName) { showToast('没有打开的设计', 'warn'); return; }
+  cancelScheduledServerSync(designName);
+  try {
+    await syncStateToServer(designName, { force: true });
+    showToast('已保存到设计 JSON', 'success');
+  } catch (error) {
+    if (error.name !== 'AbortError') showToast('保存失败: ' + error.message, 'error');
+  }
 }
 
 // ─── State ──────────────────────────────────────────────────────────────
@@ -159,6 +242,7 @@ const state = {
   openTabs: [],         // [{ name, module }]
   activeTab: null,      // designName
   activeDesign: null,   // currently selected design in sidebar list
+  serverSyncEnabled: {}, // 设计名 -> 是否启用实时同步
   expandedModules: {},  // designName -> Set(modName)
   collapsedState: loadCollapsedState(),   // "modName:side:groupLabel" -> bool (true = expanded)
   // Layout overrides per design: { instName: { x, y, width?, height? } }
@@ -168,6 +252,7 @@ const state = {
   // Pan & zoom
   pan: { x: 0, y: 0 },
   zoom: 1,
+  autoFitPending: {},  // 设计名 -> 打开后是否需要自动适配画布
   dragging: false,
   dragStart: { x: 0, y: 0 },
   panStart: { x: 0, y: 0 },
@@ -229,6 +314,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initPanZoom();
   initTreeKeyboardNav();
   initSidebarResize();
+  updateServerSyncControls();
   loadDesignList();
 
   // Update clock/reset toggle button text on load
@@ -290,6 +376,8 @@ window.toggleExportGroup = toggleExportGroup;
 window.toggleViewOpsGroup = toggleViewOpsGroup;
 window.toggleFullscreen = toggleFullscreen;
 window.refreshDesign = refreshDesign;
+window.setServerSyncEnabled = setServerSyncEnabled;
+window.saveCurrentDesignState = saveCurrentDesignState;
 window.openSettingsPanel = openSettingsPanel;
 window.closeSettingsModal = closeSettingsModal;
 window.applySettings = applySettings;
@@ -516,6 +604,7 @@ function toggleFullscreen() {
 async function refreshDesign() {
   const name = state.activeTab;
   if (!name) { showToast('没有打开的设计', 'warn'); return; }
+  cancelScheduledServerSync(name);
   showToast(`正在刷新 ${name}...`, 'info');
   try {
     const res = await fetch('/api/refresh', {
@@ -714,7 +803,9 @@ async function doAnalyze() {
       return;
     }
     status.className = 'status-msg success';
-    status.textContent = `✓ ${data.saved_as}`;
+    status.textContent = data.analysis_notice
+      ? `✓ ${data.saved_as}（${data.analysis_notice}）`
+      : `✓ ${data.saved_as}`;
     await loadDesignList();
     openDesign(data.saved_as);
   } catch (err) {
@@ -841,6 +932,7 @@ async function openDesign(name) {
 
     state.designs[name] = data;
     state.activeDesign = name;
+    state.serverSyncEnabled[name] = data.server_sync_enabled !== false;
     if (!state.expandedModules[name]) {
       state.expandedModules[name] = new Set();
     }
@@ -865,22 +957,15 @@ async function openDesign(name) {
       }
     }
 
-    // Load layout: server JSON is the source of truth (always synced on open/change).
+    // 服务器 JSON 是既有设计的唯一布局来源；localStorage 仅兼容早期无布局文件。
     updateLoadProgress(48, '恢复布局、连线和注释块...');
-    // Fall back to localStorage only for old files that pre-date the sync feature.
     const serverLayout = data.layout || {};
     const localLayout = loadLayout(name);
     const hasServerLayout = Object.keys(serverLayout).length > 0;
-    const hasLocalLayout = Object.keys(localLayout).length > 0;
     if (hasServerLayout) {
-      // Server JSON wins — merge any localStorage-only entries that aren't in the server JSON
-      // (edge case: user moved a module and sync hadn't fired yet before refresh)
-      state.layoutOverrides[name] = hasLocalLayout
-        ? { ...localLayout, ...serverLayout }  // server overrides local for known keys
-        : serverLayout;
-      saveLayout(name, state.layoutOverrides[name]);
-    } else if (hasLocalLayout) {
-      // Old file with no layout in JSON — use localStorage (will be synced to JSON shortly)
+      state.layoutOverrides[name] = serverLayout;
+      saveLayout(name, state.layoutOverrides[name], { sync: false });
+    } else if (Object.keys(localLayout).length > 0) {
       state.layoutOverrides[name] = localLayout;
     } else {
       state.layoutOverrides[name] = {};
@@ -889,18 +974,15 @@ async function openDesign(name) {
     const serverWaypoints = data.wire_waypoints || {};
     const localWaypoints = loadWireWaypoints(name);
     const hasServerWp = Object.keys(serverWaypoints).length > 0;
-    const hasLocalWp = Object.keys(localWaypoints).length > 0;
     if (hasServerWp) {
-      state.wireWaypoints[name] = hasLocalWp
-        ? { ...localWaypoints, ...serverWaypoints }
-        : serverWaypoints;
-      saveWireWaypoints(name, state.wireWaypoints[name]);
-    } else if (hasLocalWp) {
+      state.wireWaypoints[name] = serverWaypoints;
+      saveWireWaypoints(name, state.wireWaypoints[name], { sync: false });
+    } else if (Object.keys(localWaypoints).length > 0) {
       state.wireWaypoints[name] = localWaypoints;
     } else {
       state.wireWaypoints[name] = {};
     }
-    // Load customizations: server JSON wins (synced on every change), fall back to localStorage for old files
+    // 服务器 JSON 优先；localStorage 只用于没有保存状态的旧设计。
     const serverCustom = normalizeCustomizations(data.customizations || {});
     const localCustom = loadCustomizations(name);
     const hasServer = Object.keys(serverCustom.modules || {}).length > 0
@@ -910,11 +992,7 @@ async function openDesign(name) {
       || Object.keys(localCustom.wires || {}).length > 0
       || Object.keys(localCustom.commentBlocks || {}).length > 0;
     if (hasServer) {
-      state.customizations[name] = hasLocal ? {
-        modules: { ...localCustom.modules, ...serverCustom.modules },
-        wires: { ...localCustom.wires, ...serverCustom.wires },
-        commentBlocks: { ...localCustom.commentBlocks, ...serverCustom.commentBlocks },
-      } : serverCustom;
+      state.customizations[name] = serverCustom;
       saveCustomizations(name, state.customizations[name]);
     } else if (hasLocal) {
       state.customizations[name] = localCustom;
@@ -939,15 +1017,16 @@ async function openDesign(name) {
           added = true;
         }
       }
-      if (added) saveLayout(name, state.layoutOverrides[name]);
+      if (added) saveLayout(name, state.layoutOverrides[name], { sync: false });
     }
 
-    // Load persisted view state (pan/zoom), fall back to server JSON
-    const savedView = loadViewState(name) || data.view_state || null;
+    // 只使用 JSON 中的视图状态，避免旧浏览器缓存影响重新打开的设计。
+    const savedView = data.view_state || null;
+    state.autoFitPending[name] = !savedView;
     if (savedView) {
       state.pan = savedView.pan;
       state.zoom = savedView.zoom;
-      if (!loadViewState(name)) saveViewState(name, savedView);
+      saveViewState(name, savedView, { sync: false });
     } else {
       state.pan = { x: 0, y: 0 };
       state.zoom = 1;
@@ -958,6 +1037,7 @@ async function openDesign(name) {
       state.openTabs.push({ name, module: data.top_modules?.[0] || Object.keys(data.modules)[0] });
     }
     state.activeTab = name;
+    updateServerSyncControls();
 
     // Show sections
     updateLoadProgress(74, '渲染模块树...');
@@ -975,11 +1055,6 @@ async function openDesign(name) {
     updateLoadProgress(96, '完成画布初始化...');
     await nextFrame();
     loadDesignList();  // update highlight
-
-    // Always sync current state to server JSON so the file stays portable.
-    // This ensures localStorage positions/waypoints/customizations are written
-    // into the JSON even if the user hasn't made any changes since the last sync.
-    scheduleSyncToServer(name);
 
     // Restore sidebar UI state from JSON
     const sui = data.sidebar_ui;
@@ -1029,6 +1104,7 @@ async function renameDesign(oldName) {
   const newName = prompt(`将 "${oldName}" 重命名为：`, oldName);
   if (!newName || newName.trim() === oldName) return;
   const trimmed = newName.trim();
+  cancelScheduledServerSync(oldName);
   try {
     const res = await fetch('/api/rename', {
       method: 'POST',
@@ -1044,9 +1120,11 @@ async function renameDesign(oldName) {
       [STORAGE_VIEW_KEY_PREFIX,   loadViewState,        saveViewState       ],
       [STORAGE_CUSTOM_PREFIX,     loadCustomizations,   saveCustomizations  ],
     ];
+    state.serverSyncEnabled[trimmed] = isServerSyncEnabled(oldName);
+    delete state.serverSyncEnabled[oldName];
     lsKeys.forEach(([, loader, saver]) => {
       const val = loader(oldName);
-      if (val && Object.keys(val).length > 0) saver(trimmed, val);
+      if (val && Object.keys(val).length > 0) saver(trimmed, val, { sync: false });
       try { localStorage.removeItem(STORAGE_KEY_PREFIX.replace(/layout/, lsKeys[0][0]) + oldName); } catch(e) {}
     });
     // Remove old keys explicitly
@@ -1090,9 +1168,11 @@ async function deleteDesign(name) {
   if (!name) return;
   if (!confirm(`确定删除 "${name}"?`)) return;
   try {
+    cancelScheduledServerSync(name);
     await fetch(`/api/delete/${name}`, { method: 'DELETE' });
     delete state.designs[name];
     delete state.expandedModules[name];
+    delete state.serverSyncEnabled[name];
     state.openTabs = state.openTabs.filter(t => t.name !== name);
     if (state.activeTab === name) {
       state.activeTab = state.openTabs[0]?.name || null;
@@ -1116,6 +1196,7 @@ async function deleteDesign(name) {
 // ─── Tabs ───────────────────────────────────────────────────────────────
 
 function renderTabs() {
+  updateServerSyncControls();
   const bar = $('tab-bar');
   bar.innerHTML = '';
   state.openTabs.forEach(tab => {
@@ -1685,6 +1766,7 @@ function renderCanvas() {
       clearActiveCommentBlock();
       if (!instName) return; // top-level bounding box, no instance
       if (!modName || !modules[modName]?.instances?.length) return; // leaf module
+      clearBoxSelection();
       navigateToModuleView(tab.name, modName);
     });
 
@@ -1991,13 +2073,9 @@ function renderCanvas() {
     });
   }
 
-  // Auto-fit on first render (or restore saved view)
-  const savedView = loadViewState(tab.name);
-  if (savedView && state.pan.x === 0 && state.pan.y === 0 && state.zoom === 1) {
-    state.pan = savedView.pan;
-    state.zoom = savedView.zoom;
-    applyTransform();
-  } else if (state.pan.x === 0 && state.pan.y === 0 && state.zoom === 1) {
+  // 仅在打开没有保存视图的新设计时自动适配一次。
+  if (state.autoFitPending[tab.name]) {
+    state.autoFitPending[tab.name] = false;
     scheduleFitToView(450);
   }
 
