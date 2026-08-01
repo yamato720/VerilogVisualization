@@ -648,7 +648,8 @@ def analyze_and_save(source_path: str, data_dir: str, save_name_override: str = 
                 previous_design = json.load(saved_file)
             for key in (
                 'layout', 'wire_waypoints', 'view_state', 'customizations',
-                'tree_expanded', 'sidebar_ui', 'canvas_controls', 'server_sync_enabled',
+                'tree_expanded', 'inline_expanded_paths', 'sidebar_ui',
+                'canvas_controls', 'server_sync_enabled',
             ):
                 if key in previous_design:
                     saved_ui_state[key] = previous_design[key]

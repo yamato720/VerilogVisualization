@@ -25,6 +25,11 @@ const LAYOUT = {
   WIRE_GRID: 10,       // grid snap for obstacle avoidance
   WIRE_MARGIN: 15,     // margin around modules for wire routing
   WAYPOINT_R: 5,       // radius of draggable waypoint circles
+  INLINE_MAX_DEPTH: 32,
+  INLINE_CONTENT_X: 72,
+  INLINE_CONTENT_Y: 22,
+  INLINE_PAD_RIGHT: 72,
+  INLINE_PAD_BOTTOM: 50,
 };
 
 const COL = {
@@ -45,6 +50,22 @@ function svgEl(tag, attrs = {}) {
   const el = document.createElementNS(NS, tag);
   for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
   return el;
+}
+
+function scopedLayoutKey(parentModuleName, instanceName) {
+  return `${parentModuleName}::${instanceName}`;
+}
+
+function childRenderPath(parentPath, instanceName) {
+  return parentPath.endsWith('::')
+    ? `${parentPath}${instanceName}`
+    : `${parentPath}/${instanceName}`;
+}
+
+function getLayoutOverride(layoutOverrides, parentModuleName, instanceName) {
+  return layoutOverrides?.[scopedLayoutKey(parentModuleName, instanceName)]
+    || layoutOverrides?.[instanceName]
+    || null;
 }
 
 // ─── Port grouping (Vivado-style collapse) ─────────────────────────────
@@ -158,10 +179,27 @@ function calcModuleSize(mod, collapsedState = {}, hideClockReset = false) {
 // ─── Render a single module box ──────────────────────────────────────────
 
 function renderModuleBox(mod, x, y, opts = {}) {
-  const { isTop = false, collapsedState = {}, instName = '', widthOverride, heightOverride, hideClockReset = false, customizations } = opts;
+  const {
+    isTop = false,
+    collapsedState = {},
+    instName = '',
+    widthOverride,
+    heightOverride,
+    displayWidth,
+    displayHeight,
+    hideClockReset = false,
+    customizations,
+    inlineExpanded = false,
+    renderPath = '',
+    layoutKey = '',
+    layoutOriginX = 0,
+    layoutOriginY = 0,
+    expansionBlocked = false,
+    expansionBlockedReason = '',
+  } = opts;
   const info = calcModuleSize(mod, collapsedState, hideClockReset);
-  const W = widthOverride || info.width;
-  const H = heightOverride || info.height;
+  const W = displayWidth || (inlineExpanded ? info.width : (widthOverride || info.width));
+  const H = displayHeight || (inlineExpanded ? info.height : (heightOverride || info.height));
   const { inGroups, outGroups } = info;
 
   // Custom module color / rename / comment
@@ -171,21 +209,26 @@ function renderModuleBox(mod, x, y, opts = {}) {
   const customComment = modCustom?.comment || null;
 
   const g = svgEl('g', {
-    class: 'module-box',
+    class: `module-box${inlineExpanded ? ' inline-expanded' : ''}`,
     transform: `translate(${x}, ${y})`,
     'data-module': mod.name,
     'data-instance': instName,
+    'data-render-path': renderPath,
+    'data-layout-key': layoutKey,
+    'data-layout-origin-x': layoutOriginX,
+    'data-layout-origin-y': layoutOriginY,
+    'data-inline-expanded': inlineExpanded ? 'true' : 'false',
   });
 
   // Main rect
   g.appendChild(svgEl('rect', {
     class: 'module-rect', x: 0, y: 0, width: W, height: H, rx: 6, ry: 6,
-    fill: customFill || (isTop ? COL.topFill : COL.modFill),
+    fill: inlineExpanded ? 'none' : (customFill || (isTop ? COL.topFill : COL.modFill)),
     stroke: isTop ? COL.topStroke : COL.modStroke,
     'stroke-width': isTop ? 2 : 1.5,
   }));
   // Header
-  g.appendChild(svgEl('rect', { x: 1, y: 1, width: W - 2, height: LAYOUT.MODULE_HEADER_H - 1, rx: 5, ry: 5, fill: COL.header }));
+  g.appendChild(svgEl('rect', { class: 'module-header-primary', x: 1, y: 1, width: W - 2, height: LAYOUT.MODULE_HEADER_H - 1, rx: 5, ry: 5, fill: COL.header }));
   g.appendChild(svgEl('rect', { x: 1, y: LAYOUT.MODULE_HEADER_H / 2, width: W - 2, height: LAYOUT.MODULE_HEADER_H / 2, fill: COL.header }));
 
   // Title text
@@ -207,11 +250,39 @@ function renderModuleBox(mod, x, y, opts = {}) {
 
   // Expand indicator
   if (mod.instances && mod.instances.length > 0) {
-    const ei = svgEl('text', {
-      class: 'expand-indicator', x: W - 8, y: LAYOUT.MODULE_HEADER_H / 2 + 4,
-      'text-anchor': 'end', fill: '#58a6ff', 'font-size': 12, style: 'cursor:pointer;',
+    const hitW = 22;
+    const ei = svgEl('g', {
+      class: `expand-indicator${expansionBlocked ? ' expansion-blocked' : ''}`,
+      transform: `translate(${W - hitW - 2}, 4)`,
+      role: 'button',
+      tabindex: expansionBlocked ? '-1' : '0',
+      'aria-label': expansionBlocked
+        ? `无法展开 ${instName || mod.name}`
+        : `${inlineExpanded ? '收起' : '展开'} ${instName || mod.name}`,
+      'aria-expanded': inlineExpanded ? 'true' : 'false',
+      'data-render-path': renderPath,
+      'data-expansion-blocked': expansionBlocked ? 'true' : 'false',
+      style: expansionBlocked ? 'cursor:not-allowed;' : 'cursor:pointer;',
     });
-    ei.textContent = '▶';
+    ei.appendChild(svgEl('rect', {
+      class: 'expand-indicator-hit',
+      x: 0, y: 0, width: hitW, height: LAYOUT.MODULE_HEADER_H - 8,
+      rx: 3, fill: 'transparent',
+    }));
+    const eiText = svgEl('text', {
+      x: hitW / 2, y: LAYOUT.MODULE_HEADER_H / 2 + 1,
+      'text-anchor': 'middle',
+      fill: expansionBlocked ? COL.dim : '#58a6ff',
+      'font-size': 12,
+      'pointer-events': 'none',
+    });
+    eiText.textContent = expansionBlocked ? '×' : (inlineExpanded ? '▼' : '▶');
+    ei.appendChild(eiText);
+    if (expansionBlockedReason) {
+      const blockedTitle = svgEl('title');
+      blockedTitle.textContent = expansionBlockedReason;
+      ei.appendChild(blockedTitle);
+    }
     g.appendChild(ei);
   }
 
@@ -219,7 +290,7 @@ function renderModuleBox(mod, x, y, opts = {}) {
   if (instName) {
     const hasExpand = mod.instances && mod.instances.length > 0;
     const btnW = 18, btnH = 14;
-    const gearCX = hasExpand ? W - 28 : W - 12;
+    const gearCX = hasExpand ? W - 40 : W - 12;
     const gearCY = LAYOUT.MODULE_HEADER_H / 2;
     const gearG = svgEl('g', {
       class: 'module-settings-icon',
@@ -438,14 +509,18 @@ function renderModuleBox(mod, x, y, opts = {}) {
 
   // Resize handle (bottom-right corner triangle)
   const rh = LAYOUT.RESIZE_HANDLE;
-  const resizeHandle = svgEl('polygon', {
-    class: 'resize-handle',
-    points: `${W},${H - rh} ${W},${H} ${W - rh},${H}`,
-    fill: COL.resizeHandle, opacity: 0.3,
-    'data-instance': instName, 'data-module': mod.name,
-    style: 'cursor:nwse-resize;',
-  });
-  g.appendChild(resizeHandle);
+  if (!inlineExpanded) {
+    const resizeHandle = svgEl('polygon', {
+      class: 'resize-handle',
+      points: `${W},${H - rh} ${W},${H} ${W - rh},${H}`,
+      fill: COL.resizeHandle, opacity: 0.3,
+      'data-instance': instName, 'data-module': mod.name,
+      'data-render-path': renderPath,
+      'data-layout-key': layoutKey,
+      style: 'cursor:nwse-resize;',
+    });
+    g.appendChild(resizeHandle);
+  }
 
   // Drag handle (header area) - mark for identification
   g.querySelector('.module-rect').setAttribute('data-drag-target', 'true');
@@ -803,20 +878,158 @@ function drawWire(x1, y1, x2, y2, isBus, signalName, wireIdx, totalWires, wireKe
   return g;
 }
 
-// ─── Layout instances in a grid (with position/size overrides) ───────────
+// ─── Recursive layout and inline module geometry ────────────────────────
 
-function layoutInstances(instances, allModules, collapsedState, layoutOverrides, hideClockReset) {
-  const items = [];
-  instances.forEach(inst => {
-    const mod = allModules[inst.module_type];
-    if (mod) {
-      const size = calcModuleSize(mod, collapsedState, hideClockReset);
-      // Apply size override if present
-      const ovr = layoutOverrides?.[inst.instance_name];
-      if (ovr?.width) size.width = ovr.width;
-      if (ovr?.height) size.height = ovr.height;
-      items.push({ instance: inst, mod, size });
+function rectanglesOverlap(a, b, gap = 20) {
+  return a.x < b.x + b.size.width + gap
+    && a.x + a.size.width + gap > b.x
+    && a.y < b.y + b.size.height + gap
+    && a.y + a.size.height + gap > b.y;
+}
+
+function computeModuleGeometry(mod, allModules, collapsedState, layoutOverrides, options = {}) {
+  const base = calcModuleSize(mod, collapsedState, options.hideClockReset || false);
+  const override = getLayoutOverride(
+    layoutOverrides,
+    options.parentModuleName || '',
+    options.instanceName || '',
+  );
+  const ancestry = options.ancestry || [];
+  const depth = options.depth || 0;
+  const hasChildren = Boolean(mod.instances?.length);
+  const expansionBlocked = hasChildren
+    && (depth >= LAYOUT.INLINE_MAX_DEPTH || ancestry.includes(mod.name));
+  const requested = Boolean(
+    options.renderPath
+    && options.inlineExpandedPaths?.has(options.renderPath)
+    && hasChildren
+  );
+  const expanded = requested && !expansionBlocked;
+  let width = override?.width || base.width;
+  let height = override?.height || base.height;
+  let childLayout = [];
+  let contentX = LAYOUT.INLINE_CONTENT_X;
+  let contentY = LAYOUT.MODULE_HEADER_H + LAYOUT.INLINE_CONTENT_Y;
+  let frameShiftX = 0;
+  let frameShiftY = 0;
+
+  if (expanded) {
+    childLayout = layoutInstances(
+      mod.instances,
+      allModules,
+      collapsedState,
+      layoutOverrides,
+      options.hideClockReset || false,
+      {
+        parentModuleName: mod.name,
+        parentPath: options.renderPath,
+        inlineExpandedPaths: options.inlineExpandedPaths,
+        ancestry: [...ancestry, mod.name],
+        depth: depth + 1,
+      },
+    );
+    let contentLeft = 0;
+    let contentTop = 0;
+    let contentRight = 0;
+    let contentBottom = 0;
+    childLayout.forEach(item => {
+      contentLeft = Math.min(contentLeft, item.x);
+      contentTop = Math.min(contentTop, item.y);
+      contentRight = Math.max(contentRight, item.x + item.size.width);
+      contentBottom = Math.max(contentBottom, item.y + item.size.height);
+    });
+    frameShiftX = Math.min(0, contentLeft);
+    frameShiftY = Math.min(0, contentTop);
+    contentX = LAYOUT.INLINE_CONTENT_X - frameShiftX;
+    contentY = LAYOUT.MODULE_HEADER_H + LAYOUT.INLINE_CONTENT_Y - frameShiftY;
+    width = Math.max(
+      base.width,
+      contentX + contentRight + LAYOUT.INLINE_PAD_RIGHT,
+    );
+    height = Math.max(
+      base.height,
+      contentY + contentBottom + LAYOUT.INLINE_PAD_BOTTOM,
+    );
+  }
+
+  return {
+    width,
+    height,
+    expanded,
+    expansionBlocked,
+    expansionBlockedReason: expansionBlocked
+      ? (depth >= LAYOUT.INLINE_MAX_DEPTH
+        ? `已达到 ${LAYOUT.INLINE_MAX_DEPTH} 层递归保护上限`
+        : `检测到循环实例化：${[...ancestry, mod.name].join(' → ')}`)
+      : '',
+    childLayout,
+    contentX,
+    contentY,
+    frameShiftX,
+    frameShiftY,
+  };
+}
+
+function applyInlineSiblingAvoidance(items) {
+  if (!items.some(item => item.geometry.expanded)) return items;
+  const placed = [];
+  const placementOrder = items
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const expansionPriority = Number(right.item.geometry.expanded)
+        - Number(left.item.geometry.expanded);
+      return expansionPriority || left.index - right.index;
+    });
+  placementOrder.forEach(({ item }) => {
+    const displayBaseX = item.x;
+    const displayBaseY = item.y;
+    let attempts = 0;
+    while (attempts < Math.max(8, items.length * 3)) {
+      const blocker = placed.find(other => rectanglesOverlap(item, other));
+      if (!blocker) break;
+      const moveRight = blocker.x + blocker.size.width + LAYOUT.INST_GAP_X - displayBaseX;
+      const moveDown = blocker.y + blocker.size.height + LAYOUT.INST_GAP_Y - displayBaseY;
+      if (moveRight <= moveDown) {
+        item.x = displayBaseX + Math.max(0, moveRight);
+      } else {
+        item.y = displayBaseY + Math.max(0, moveDown);
+      }
+      attempts += 1;
     }
+    item.displayOffsetX = item.x - displayBaseX;
+    item.displayOffsetY = item.y - displayBaseY;
+    placed.push(item);
+  });
+  return items;
+}
+
+function layoutInstances(instances, allModules, collapsedState, layoutOverrides, hideClockReset, options = {}) {
+  const parentModuleName = options.parentModuleName || '';
+  const parentPath = options.parentPath || `${parentModuleName}::`;
+  const items = [];
+  (instances || []).forEach(inst => {
+    const mod = allModules[inst.module_type];
+    if (!mod) return;
+    const renderPath = childRenderPath(parentPath, inst.instance_name);
+    const layoutKey = scopedLayoutKey(parentModuleName, inst.instance_name);
+    const geometry = computeModuleGeometry(mod, allModules, collapsedState, layoutOverrides, {
+      parentModuleName,
+      instanceName: inst.instance_name,
+      renderPath,
+      inlineExpandedPaths: options.inlineExpandedPaths || new Set(),
+      ancestry: options.ancestry || [],
+      depth: options.depth || 0,
+      hideClockReset,
+    });
+    items.push({
+      instance: inst,
+      mod,
+      geometry,
+      size: { width: geometry.width, height: geometry.height },
+      renderPath,
+      layoutKey,
+      override: getLayoutOverride(layoutOverrides, parentModuleName, inst.instance_name),
+    });
   });
   if (items.length === 0) return [];
 
@@ -828,291 +1041,377 @@ function layoutInstances(instances, allModules, collapsedState, layoutOverrides,
   let col = 0;
 
   items.forEach(item => {
-    // Check for position override
-    const ovr = layoutOverrides?.[item.instance.instance_name];
-    if (ovr?.x !== undefined && ovr?.y !== undefined) {
-      results.push({ ...item, x: ovr.x, y: ovr.y });
-    } else {
-      if (col >= cols) {
-        col = 0;
-        cx = LAYOUT.MOD_PAD_X;
-        cy += rowH + LAYOUT.INST_GAP_Y;
-        rowH = 0;
-      }
-      results.push({ ...item, x: cx, y: cy });
-      cx += item.size.width + LAYOUT.INST_GAP_X + LAYOUT.PORT_STUB * 2;
-      rowH = Math.max(rowH, item.size.height);
-      col++;
+    const override = item.override;
+    if (override?.x !== undefined && override?.y !== undefined) {
+      const baseX = override.x;
+      const baseY = override.y;
+      results.push({
+        ...item,
+        baseX,
+        baseY,
+        x: baseX + (item.geometry.frameShiftX || 0),
+        y: baseY + (item.geometry.frameShiftY || 0),
+      });
+      return;
     }
+    if (col >= cols) {
+      col = 0;
+      cx = LAYOUT.MOD_PAD_X;
+      cy += rowH + LAYOUT.INST_GAP_Y;
+      rowH = 0;
+    }
+    const frameShiftX = item.geometry.frameShiftX || 0;
+    const frameShiftY = item.geometry.frameShiftY || 0;
+    results.push({
+      ...item,
+      baseX: cx - frameShiftX,
+      baseY: cy - frameShiftY,
+      x: cx,
+      y: cy,
+    });
+    cx += item.size.width + LAYOUT.INST_GAP_X + LAYOUT.PORT_STUB * 2;
+    rowH = Math.max(rowH, item.size.height);
+    col += 1;
   });
-  return results;
+  return applyInlineSiblingAvoidance(results);
 }
 
-// ─── Render internal view of a module ────────────────────────────────────
+function renderModuleTree(item, x, y, allModules, collapsedState, layoutOverrides, wireWaypoints, options) {
+  const geometry = item.geometry;
+  const render = renderModuleBox(item.mod, x, y, {
+    collapsedState,
+    instName: item.instance.instance_name,
+    displayWidth: geometry.width,
+    displayHeight: geometry.height,
+    hideClockReset: options.hideClockReset,
+    customizations: options.customizations,
+    inlineExpanded: geometry.expanded,
+    renderPath: item.renderPath,
+    layoutKey: item.layoutKey,
+    layoutOriginX: options.layoutOriginX || 0,
+    layoutOriginY: options.layoutOriginY || 0,
+    expansionBlocked: geometry.expansionBlocked,
+    expansionBlockedReason: geometry.expansionBlockedReason,
+  });
 
-function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsedState, layoutOverrides, wireWaypoints, options) {
-  const g = svgEl('g', { class: 'module-internal', 'data-module': parentMod.name });
-  const hideClockReset = options?.hideClockReset || false;
-  const customizations = options?.customizations || { modules: {}, wires: {} };
+  if (geometry.expanded) {
+    const boundaryPorts = {};
+    Object.entries(render.portPositions).forEach(([portName, pos]) => {
+      boundaryPorts[portName] = {
+        x: pos.x - x,
+        y: pos.y - y,
+        side: pos.side,
+      };
+    });
+    const internal = renderModuleInternal(
+      item.mod,
+      allModules,
+      geometry.contentX,
+      geometry.contentY,
+      collapsedState,
+      layoutOverrides,
+      wireWaypoints,
+      {
+        ...options,
+        parentPath: item.renderPath,
+        ancestry: [...(options.ancestry || []), item.mod.name],
+        depth: (options.depth || 0) + 1,
+        boundaryPorts,
+        precomputedLayout: geometry.childLayout,
+      },
+    );
+    const header = render.group.children?.[1] || null;
+    render.group.insertBefore(internal, header);
+  }
 
-  // Create separate layers so wires render behind module boxes
+  return render;
+}
+
+function expressionKeys(expression) {
+  const compact = String(expression || '').replace(/\s+/g, '');
+  if (!compact) return [];
+  const keys = new Set([compact]);
+  const base = compact.replace(/\[[^\]]+\]/g, '');
+  if (base) keys.add(base);
+  const tokens = compact.match(/[a-zA-Z_]\w*/g) || [];
+  tokens.forEach(token => keys.add(token));
+  return [...keys];
+}
+
+function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsedState, layoutOverrides, wireWaypoints, options = {}) {
+  const g = svgEl('g', {
+    class: 'module-internal',
+    'data-module': parentMod.name,
+    'data-render-path': options.parentPath || `${parentMod.name}::`,
+    'data-scope-origin-x': offsetX,
+    'data-scope-origin-y': offsetY,
+  });
+  const hideClockReset = options.hideClockReset || false;
+  const customizations = options.customizations || { modules: {}, wires: {} };
   const wireLayer = svgEl('g', { class: 'wire-layer' });
   const moduleLayer = svgEl('g', { class: 'module-layer' });
   g.appendChild(wireLayer);
   g.appendChild(moduleLayer);
 
   const instOverrides = layoutOverrides || {};
-  const layout = layoutInstances(parentMod.instances, allModules, collapsedState, instOverrides, hideClockReset);
+  const parentPath = options.parentPath || `${parentMod.name}::`;
+  const layout = options.precomputedLayout || layoutInstances(
+    parentMod.instances,
+    allModules,
+    collapsedState,
+    instOverrides,
+    hideClockReset,
+    {
+      parentModuleName: parentMod.name,
+      parentPath,
+      inlineExpandedPaths: options.inlineExpandedPaths || new Set(),
+      ancestry: options.ancestry || [parentMod.name],
+      depth: (options.depth || 0) + 1,
+    },
+  );
   const renders = {};
 
-  // Draw each instance
   layout.forEach(item => {
     const ix = offsetX + item.x;
     const iy = offsetY + item.y;
-    const ovr = instOverrides[item.instance.instance_name];
-    const r = renderModuleBox(item.mod, ix, iy, {
+    const render = renderModuleTree(
+      item,
+      ix,
+      iy,
+      allModules,
       collapsedState,
-      instName: item.instance.instance_name,
-      widthOverride: ovr?.width,
-      heightOverride: ovr?.height,
-      hideClockReset,
-      customizations,
-    });
-    moduleLayer.appendChild(r.group);
+      instOverrides,
+      wireWaypoints,
+      {
+        ...options,
+        hideClockReset,
+        customizations,
+        layoutOriginX: offsetX
+          + (item.displayOffsetX || 0)
+          + (item.geometry.frameShiftX || 0),
+        layoutOriginY: offsetY
+          + (item.displayOffsetY || 0)
+          + (item.geometry.frameShiftY || 0),
+      },
+    );
+    moduleLayer.appendChild(render.group);
     renders[item.instance.instance_name] = {
-      portPositions: r.portPositions,
-      portGroupIds: r.portGroupIds,
+      portPositions: render.portPositions,
+      portGroupIds: render.portGroupIds,
       instance: item.instance,
       mod: item.mod,
-      x: ix, y: iy, size: r.size,
+      x: ix,
+      y: iy,
+      size: render.size,
+      renderPath: item.renderPath,
     };
   });
 
-  // ── Build wire-name → instance-port mapping ──
-  // Each instance connection: inst.connections[portName] = wireName
-  // We map wireName → { inst, port, direction, pos }
-  const wireToInstPort = {};  // wireName -> [{inst, port, dir, pos, portDef}]
+  const wireToInstPort = {};
+  const addWireEndpoint = (expression, endpoint) => {
+    expressionKeys(expression).forEach(key => {
+      if (!wireToInstPort[key]) wireToInstPort[key] = [];
+      if (!wireToInstPort[key].some(existing => (
+        existing.inst === endpoint.inst && existing.port === endpoint.port
+      ))) {
+        wireToInstPort[key].push(endpoint);
+      }
+    });
+  };
 
   layout.forEach(item => {
     const instName = item.instance.instance_name;
     const render = renders[instName];
     if (!render) return;
-    const modDef = render.mod;
-
-    for (const [portName, wireName] of Object.entries(item.instance.connections)) {
-      if (!wireName || wireName.trim() === '') continue;
-      const portDef = modDef.ports.find(p => p.name === portName);
-      if (!portDef) continue;
+    for (const [portName, wireName] of Object.entries(item.instance.connections || {})) {
+      if (!wireName || !String(wireName).trim()) continue;
+      const portDef = render.mod.ports.find(port => port.name === portName);
       const pos = render.portPositions[portName];
-      if (!pos) continue;
-
-      const cleanWire = wireName.replace(/\s+/g, '');
-      if (!wireToInstPort[cleanWire]) wireToInstPort[cleanWire] = [];
-      wireToInstPort[cleanWire].push({
-        inst: instName, port: portName, dir: portDef.direction,
-        pos, portDef, portGroupId: render.portGroupIds[portName] || portName,
+      if (!portDef || !pos) continue;
+      addWireEndpoint(wireName, {
+        inst: instName,
+        port: portName,
+        dir: portDef.direction,
+        pos,
+        portDef,
+        portGroupId: render.portGroupIds[portName] || portName,
       });
     }
   });
 
-  // ── Helper: extract all wire name tokens from an expression ──
-  // Matches identifiers that look like instance port wires (e.g., InsBuffer_inst_io_busy)
-  // Filters out numeric literals, Verilog keywords, and pure constants
-  function extractWireRefs(expr) {
-    const verilogKeywords = new Set([
-      'wire', 'reg', 'input', 'output', 'assign', 'if', 'else', 'begin', 'end',
-      'and', 'or', 'not', 'xor', 'nand', 'nor', 'xnor',
-    ]);
-    // Match all identifier tokens (word characters)
-    const tokens = expr.match(/\b[a-zA-Z_]\w*\b/g) || [];
-    // Filter: keep only tokens that aren't keywords
-    return [...new Set(tokens.filter(t => !verilogKeywords.has(t)))];
+  if (options.boundaryPorts) {
+    (parentMod.ports || []).forEach(portDef => {
+      const pos = options.boundaryPorts[portDef.name];
+      if (!pos) return;
+      const endpoint = {
+        inst: portDef.direction === 'input' ? '@parent-input' : '@parent-output',
+        port: portDef.name,
+        dir: portDef.direction === 'input' ? 'output'
+          : (portDef.direction === 'output' ? 'input' : 'inout'),
+        pos: {
+          ...pos,
+          side: portDef.direction === 'input' ? 'right' : 'left',
+        },
+        portDef,
+        portGroupId: `parent:${portDef.name}`,
+      };
+      addWireEndpoint(portDef.name, endpoint);
+    });
   }
 
-  // ── Build intermediate wire resolution: non-instance wires that chain instance ports ──
-  // e.g., wire _x = A_inst_io_out ? B_inst_io_val : 0; assign C_inst_io_in = _x;
-  // We map intermediate wire name → set of instance port wire names it references
+  const verilogKeywords = new Set([
+    'wire', 'reg', 'logic', 'input', 'output', 'assign', 'if', 'else',
+    'begin', 'end', 'and', 'or', 'not', 'xor', 'nand', 'nor', 'xnor',
+  ]);
+  const extractWireRefs = expression => expressionKeys(expression)
+    .filter(key => /^[a-zA-Z_]\w*$/.test(key) && !verilogKeywords.has(key));
   const assigns = parentMod.assigns || [];
-  const intermediateToSources = {}; // wireName -> [instPortWireName, ...]
-  assigns.forEach(asgn => {
-    const target = asgn.target.replace(/\s*\[.*?\]\s*$/, '').trim();
-    if (!wireToInstPort[target]) {
-      // Target is NOT an instance port wire → it's an intermediate
+  const intermediateToSources = {};
+
+  for (let pass = 0; pass < Math.max(2, assigns.length); pass += 1) {
+    let changed = false;
+    assigns.forEach(asgn => {
+      const targets = expressionKeys(asgn.target);
+      const target = targets.find(key => /^[a-zA-Z_]\w*$/.test(key)) || targets[0];
+      if (!target || wireToInstPort[target]) return;
       const refs = extractWireRefs(asgn.source);
-      const instRefs = refs.filter(r => wireToInstPort[r]);
-      if (instRefs.length > 0) {
-        if (!intermediateToSources[target]) intermediateToSources[target] = [];
-        instRefs.forEach(r => {
-          if (!intermediateToSources[target].includes(r)) {
-            intermediateToSources[target].push(r);
-          }
-        });
-      }
-      // Also check if source refs are themselves intermediate wires (one level of chaining)
-      const intermediateRefs = refs.filter(r => !wireToInstPort[r] && intermediateToSources[r]);
-      intermediateRefs.forEach(ir => {
-        if (!intermediateToSources[target]) intermediateToSources[target] = [];
-        intermediateToSources[ir].forEach(r => {
-          if (!intermediateToSources[target].includes(r)) {
-            intermediateToSources[target].push(r);
-          }
-        });
+      const resolved = [];
+      refs.forEach(ref => {
+        if (wireToInstPort[ref]) resolved.push(ref);
+        (intermediateToSources[ref] || []).forEach(source => resolved.push(source));
       });
-    }
-  });
-
-  // ── Use assigns to find connections ──
-  // assign target = source; means source drives target
-  // If both map to instance ports, draw a wire
-  const allWires = [];
-  const connectedPairs = new Set(); // track "out.inst.port→inp.inst.port" to avoid duplicates
-
-  assigns.forEach(asgn => {
-    const target = asgn.target.replace(/\s*\[.*?\]\s*$/, '').trim();
-    const sourceExpr = asgn.source;
-
-    // Get target ports (should be inputs being driven)
-    const targetPorts = wireToInstPort[target] || [];
-    const targetInputs = targetPorts.filter(p => p.dir === 'input');
-    if (targetInputs.length === 0) return; // target doesn't connect to any instance input
-
-    // Extract all wire references from the source expression
-    const allRefs = extractWireRefs(sourceExpr);
-
-    // Collect source wire names that map to instance port outputs
-    const sourceWireNames = [];
-    allRefs.forEach(ref => {
-      if (wireToInstPort[ref]) {
-        if (!sourceWireNames.includes(ref)) sourceWireNames.push(ref);
-      }
-      // Also resolve intermediate wires
-      if (intermediateToSources[ref]) {
-        intermediateToSources[ref].forEach(r => {
-          if (!sourceWireNames.includes(r)) sourceWireNames.push(r);
-        });
+      const unique = [...new Set(resolved)];
+      if (unique.length && JSON.stringify(unique) !== JSON.stringify(intermediateToSources[target] || [])) {
+        intermediateToSources[target] = unique;
+        changed = true;
       }
     });
-
-    // Also try the whole source as a direct wire name (strip bit-select)
-    const directSource = sourceExpr.replace(/\s*\[.*?\]\s*$/, '').trim();
-    if (wireToInstPort[directSource] && !sourceWireNames.includes(directSource)) {
-      sourceWireNames.push(directSource);
-    }
-    // And resolve if directSource is an intermediate wire
-    if (intermediateToSources[directSource]) {
-      intermediateToSources[directSource].forEach(r => {
-        if (!sourceWireNames.includes(r)) sourceWireNames.push(r);
-      });
-    }
-
-    // For each source wire that maps to an output, connect to target inputs
-    sourceWireNames.forEach(srcWire => {
-      const sourcePorts = wireToInstPort[srcWire] || [];
-      const sourceOutputs = sourcePorts.filter(p => p.dir === 'output');
-
-      if (sourceOutputs.length > 0) {
-        sourceOutputs.forEach(out => {
-          targetInputs.forEach(inp => {
-            const pairKey = `${out.inst}.${out.port}→${inp.inst}.${inp.port}`;
-            if (!connectedPairs.has(pairKey)) {
-              connectedPairs.add(pairKey);
-              allWires.push({
-                signal: srcWire + ' → ' + target,
-                out, inp,
-                isBus: (out.portDef.width > 1) || (inp.portDef.width > 1),
-              });
-            }
-          });
-        });
-      }
-    });
-  });
-
-  // ── Also check direct matches (same wire name on output and input) ──
-  for (const [wireName, ports] of Object.entries(wireToInstPort)) {
-    const outputs = ports.filter(p => p.dir === 'output');
-    const inputs = ports.filter(p => p.dir === 'input');
-    if (outputs.length > 0 && inputs.length > 0) {
-      outputs.forEach(out => {
-        inputs.forEach(inp => {
-          const pairKey = `${out.inst}.${out.port}→${inp.inst}.${inp.port}`;
-          if (!connectedPairs.has(pairKey)) {
-            connectedPairs.add(pairKey);
-            allWires.push({
-              signal: wireName,
-              out, inp,
-              isBus: (out.portDef.width > 1) || (inp.portDef.width > 1),
-            });
-          }
-        });
-      });
-    }
+    if (!changed) break;
   }
 
-  // ── Filter clock/reset wires if requested ──
+  const allWires = [];
+  const connectedPairs = new Set();
+  const isOutput = port => port.dir === 'output' || port.dir === 'inout';
+  const isInput = port => port.dir === 'input' || port.dir === 'inout';
+  const connectPorts = (signal, sourcePorts, targetPorts) => {
+    sourcePorts.filter(isOutput).forEach(out => {
+      targetPorts.filter(isInput).forEach(inp => {
+        if (out.inst === inp.inst && out.port === inp.port) return;
+        const pairKey = `${out.inst}.${out.port}→${inp.inst}.${inp.port}`;
+        if (connectedPairs.has(pairKey)) return;
+        connectedPairs.add(pairKey);
+        allWires.push({
+          signal,
+          out,
+          inp,
+          isBus: (out.portDef.width > 1) || (inp.portDef.width > 1),
+        });
+      });
+    });
+  };
+
+  assigns.forEach(asgn => {
+    const targetNames = expressionKeys(asgn.target);
+    const targetPorts = targetNames.flatMap(name => wireToInstPort[name] || []);
+    if (!targetPorts.some(isInput)) return;
+    const sourceNames = new Set(expressionKeys(asgn.source));
+    [...sourceNames].forEach(name => {
+      (intermediateToSources[name] || []).forEach(source => sourceNames.add(source));
+    });
+    sourceNames.forEach(name => {
+      if (wireToInstPort[name]) connectPorts(
+        `${name} → ${targetNames[0] || asgn.target}`,
+        wireToInstPort[name],
+        targetPorts,
+      );
+    });
+  });
+
+  Object.entries(wireToInstPort).forEach(([wireName, ports]) => {
+    if (ports.some(isOutput) && ports.some(isInput)) {
+      connectPorts(wireName, ports, ports);
+    }
+  });
+
   const clockResetPattern = /\b(clock|reset|clk|rst)\b/i;
   const filteredWires = hideClockReset
-    ? allWires.filter(w => !clockResetPattern.test(w.signal) && !clockResetPattern.test(w.out.port) && !clockResetPattern.test(w.inp.port))
+    ? allWires.filter(wire => (
+      !clockResetPattern.test(wire.signal)
+      && !clockResetPattern.test(wire.out.port)
+      && !clockResetPattern.test(wire.inp.port)
+    ))
     : allWires;
-
-  // Ports in a collapsed group intentionally share one visible endpoint.  Drawing
-  // every scalar dependency there produces an unreadable stack of coincident wires,
-  // so render the group as one bus. Expanding either group restores per-port wires.
   const bundledWires = new Map();
-  filteredWires.forEach(w => {
-    const key = `${w.out.inst}:${w.out.portGroupId}→${w.inp.inst}:${w.inp.portGroupId}`;
+  filteredWires.forEach(wire => {
+    const key = `${wire.out.inst}:${wire.out.portGroupId}→${wire.inp.inst}:${wire.inp.portGroupId}`;
     let bundle = bundledWires.get(key);
     if (!bundle) {
-      bundle = { ...w, members: [] };
+      bundle = { ...wire, members: [] };
       bundledWires.set(key, bundle);
     }
-    bundle.members.push(w);
+    bundle.members.push(wire);
   });
   const visibleWires = [...bundledWires.values()];
-
-  // ── Draw wires with obstacle avoidance ──
-  // Build obstacle list from rendered module bounding boxes
-  const obstacles = [];
-  for (const [instName, render] of Object.entries(renders)) {
-    obstacles.push({
-      x: render.x,
-      y: render.y,
-      w: render.size.width,
-      h: render.size.height,
-      inst: instName,
-    });
-  }
-
+  const obstacles = Object.entries(renders).map(([instName, render]) => ({
+    x: render.x,
+    y: render.y,
+    w: render.size.width,
+    h: render.size.height,
+    inst: instName,
+  }));
   const wireCountByPair = {};
   const wireIdxByPair = {};
-
-  visibleWires.forEach(w => {
-    const pairKey = `${w.out.inst}→${w.inp.inst}`;
+  visibleWires.forEach(wire => {
+    const pairKey = `${wire.out.inst}→${wire.inp.inst}`;
     wireCountByPair[pairKey] = (wireCountByPair[pairKey] || 0) + 1;
   });
 
-  visibleWires.forEach(w => {
-    const pairKey = `${w.out.inst}→${w.inp.inst}`;
-    const idx = wireIdxByPair[pairKey] || 0;
-    wireIdxByPair[pairKey] = idx + 1;
-    const total = wireCountByPair[pairKey];
-
-    // Wire key for identifying this wire in layout persistence
-    const wireKey = `${w.out.inst}.${w.out.port}→${w.inp.inst}.${w.inp.port}`;
-    const waypoints = wireWaypoints?.[wireKey] || [];
-    const customWireColor = customizations.wires?.[wireKey]?.color || null;
-    const signalName = w.members.length > 1
-      ? `${w.signal} 等 ${w.members.length} 条信号`
-      : w.signal;
-
-    const wire = drawWire(
-      w.out.pos.x, w.out.pos.y,
-      w.inp.pos.x, w.inp.pos.y,
-      w.isBus || w.members.length > 1, signalName, idx, total,
-      wireKey, waypoints, obstacles, customWireColor,
-      w.out.pos.side, w.inp.pos.side,
+  visibleWires.forEach(wire => {
+    const pairKey = `${wire.out.inst}→${wire.inp.inst}`;
+    const index = wireIdxByPair[pairKey] || 0;
+    wireIdxByPair[pairKey] = index + 1;
+    const localWireKey = `${wire.out.inst}.${wire.out.port}→${wire.inp.inst}.${wire.inp.port}`;
+    const wireKey = `${parentMod.name}::${localWireKey}`;
+    const savedWaypoints = wireWaypoints?.[wireKey];
+    const legacyWaypoints = wireWaypoints?.[localWireKey];
+    const canonicalWaypoints = savedWaypoints || (legacyWaypoints
+      ? legacyWaypoints.map(point => ({ x: point.x - 50, y: point.y - 50 }))
+      : []);
+    const displayWaypoints = canonicalWaypoints.map(point => ({
+      x: point.x + offsetX,
+      y: point.y + offsetY,
+    }));
+    const customWireColor = customizations.wires?.[wireKey]?.color
+      || customizations.wires?.[localWireKey]?.color
+      || null;
+    const signalName = wire.members.length > 1
+      ? `${wire.signal} 等 ${wire.members.length} 条信号`
+      : wire.signal;
+    const renderedWire = drawWire(
+      wire.out.pos.x,
+      wire.out.pos.y,
+      wire.inp.pos.x,
+      wire.inp.pos.y,
+      wire.isBus || wire.members.length > 1,
+      signalName,
+      index,
+      wireCountByPair[pairKey],
+      wireKey,
+      displayWaypoints,
+      obstacles,
+      customWireColor,
+      wire.out.pos.side,
+      wire.inp.pos.side,
     );
-    wireLayer.appendChild(wire);
+    renderedWire.setAttribute('data-waypoint-origin-x', offsetX);
+    renderedWire.setAttribute('data-waypoint-origin-y', offsetY);
+    renderedWire.setAttribute('data-render-path', `${parentPath}::wire::${localWireKey}`);
+    renderedWire.querySelectorAll?.('.wire-waypoint').forEach(handle => {
+      handle.setAttribute('data-waypoint-origin-x', offsetX);
+      handle.setAttribute('data-waypoint-origin-y', offsetY);
+      handle.setAttribute('data-render-path', `${parentPath}::wire::${localWireKey}`);
+    });
+    wireLayer.appendChild(renderedWire);
   });
 
   return g;
@@ -1120,71 +1419,118 @@ function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsed
 
 // ─── Top-level design view ──────────────────────────────────────────────
 
-function renderDesignView(topModName, allModules, expandedModules, collapsedState, layoutOverrides, wireWaypoints, options) {
+function renderDesignView(topModName, allModules, expandedModules, collapsedState, layoutOverrides, wireWaypoints, options = {}) {
   const rootG = svgEl('g', { id: 'design-root' });
   const topMod = allModules[topModName];
   if (!topMod) return rootG;
+  const parentPath = `${topModName}::`;
+  const inlineExpandedPaths = options.inlineExpandedPaths || new Set();
 
   if (expandedModules.has(topModName)) {
-    const internal = renderModuleInternal(topMod, allModules, 50, 50, collapsedState, layoutOverrides, wireWaypoints, options);
+    const renderOptions = {
+      ...options,
+      inlineExpandedPaths,
+      parentPath,
+      ancestry: [topModName],
+      depth: 0,
+    };
+    const internal = renderModuleInternal(
+      topMod,
+      allModules,
+      50,
+      50,
+      collapsedState,
+      layoutOverrides,
+      wireWaypoints,
+      renderOptions,
+    );
     rootG.appendChild(internal);
-
-    // Bounding box — compute from actual rendered positions (including overrides)
-    const layout = layoutInstances(topMod.instances, allModules, collapsedState, layoutOverrides, options?.hideClockReset);
-    let minX = Infinity, minY = Infinity, maxX = 0, maxY = 0;
+    const layout = layoutInstances(
+      topMod.instances,
+      allModules,
+      collapsedState,
+      layoutOverrides,
+      options.hideClockReset,
+      {
+        parentModuleName: topMod.name,
+        parentPath,
+        inlineExpandedPaths,
+        ancestry: [topModName],
+        depth: 1,
+      },
+    );
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = 0;
+    let maxY = 0;
     layout.forEach(item => {
-      const ix = item.x;
-      const iy = item.y;
-      minX = Math.min(minX, ix - LAYOUT.PORT_STUB);
-      minY = Math.min(minY, iy);
-      maxX = Math.max(maxX, ix + item.size.width + LAYOUT.PORT_STUB + LAYOUT.MOD_PAD_X);
-      maxY = Math.max(maxY, iy + item.size.height + LAYOUT.MOD_PAD_Y + 30);
+      minX = Math.min(minX, item.x - LAYOUT.PORT_STUB);
+      minY = Math.min(minY, item.y);
+      maxX = Math.max(maxX, item.x + item.size.width + LAYOUT.PORT_STUB + LAYOUT.MOD_PAD_X);
+      maxY = Math.max(maxY, item.y + item.size.height + LAYOUT.MOD_PAD_Y + 30);
     });
-    if (minX === Infinity) { minX = 0; minY = 0; }
-    // Add margins
+    if (minX === Infinity) {
+      minX = 0;
+      minY = 0;
+    }
     const bbX = Math.min(20, minX + 40);
     const bbY = Math.min(20, minY + 40);
     maxX = Math.max(maxX, 400) + 50;
     maxY = Math.max(maxY, 200) + 50;
-    const bbW = maxX - bbX + 30;
-    const bbH = maxY - bbY + 30;
-
-    // Dashed outline
     rootG.insertBefore(svgEl('rect', {
-      x: bbX, y: bbY, width: bbW, height: bbH, rx: 8, ry: 8,
-      fill: 'none', stroke: COL.topStroke, 'stroke-width': 2,
-      'stroke-dasharray': '8,4', opacity: 0.5,
+      x: bbX,
+      y: bbY,
+      width: maxX - bbX + 30,
+      height: maxY - bbY + 30,
+      rx: 8,
+      ry: 8,
+      fill: 'none',
+      stroke: COL.topStroke,
+      'stroke-width': 2,
+      'stroke-dasharray': '8,4',
+      opacity: 0.5,
     }), rootG.firstChild);
-
     const label = svgEl('text', {
-      x: bbX + 10, y: bbY - 5, fill: COL.topStroke, 'font-size': 16, 'font-weight': '600',
+      x: bbX + 10,
+      y: bbY - 5,
+      fill: COL.topStroke,
+      'font-size': 16,
+      'font-weight': '600',
     });
     label.textContent = `📦 ${topModName}`;
     rootG.insertBefore(label, rootG.firstChild);
-
   } else {
-    // Collapsed top-level view
-    const r = renderModuleBox(topMod, 80, 80, { isTop: true, collapsedState });
-    rootG.appendChild(r.group);
+    const render = renderModuleBox(topMod, 80, 80, {
+      isTop: true,
+      collapsedState,
+      renderPath: parentPath,
+    });
+    rootG.appendChild(render.group);
   }
 
   return rootG;
 }
 
-// ─── Public helper for app.js ─────────────────────────────────────────
-// Pre-compute initial grid positions for all instances of a module and
-// return them as a layoutOverrides-compatible object (instName → {x, y}).
-// Only entries that are NOT already present in existingOverrides are added.
 function computeInitialLayout(topModName, allModules, collapsedState, existingOverrides, hideClockReset) {
   const topMod = allModules[topModName];
   if (!topMod) return {};
   const result = {};
-  const layout = layoutInstances(topMod.instances, allModules, collapsedState, existingOverrides || {}, hideClockReset);
+  const layout = layoutInstances(
+    topMod.instances,
+    allModules,
+    collapsedState,
+    existingOverrides || {},
+    hideClockReset,
+    {
+      parentModuleName: topMod.name,
+      parentPath: `${topMod.name}::`,
+      ancestry: [topMod.name],
+      depth: 1,
+    },
+  );
   layout.forEach(item => {
-    const key = item.instance.instance_name;
-    // Only record position if not already stored (don't overwrite user-moved modules)
-    if (!existingOverrides?.[key]) {
-      result[key] = { x: item.x, y: item.y };
+    if (!existingOverrides?.[item.layoutKey] && !existingOverrides?.[item.instance.instance_name]) {
+      result[item.layoutKey] = { x: item.baseX ?? item.x, y: item.baseY ?? item.y };
     }
   });
   return result;

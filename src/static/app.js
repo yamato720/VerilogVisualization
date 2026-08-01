@@ -9,6 +9,7 @@ const STORAGE_KEY_PREFIX = 'vviz_layout_';
 const STORAGE_COLLAPSED_KEY = 'vviz_collapsed';
 const STORAGE_WIRE_KEY_PREFIX = 'vviz_wires_';
 const STORAGE_VIEW_KEY_PREFIX = 'vviz_view_';
+const STORAGE_INLINE_EXPANDED_KEY_PREFIX = 'vviz_inline_expanded_';
 const DEFAULT_SERVER_SYNC_ENABLED = true;
 
 function saveLayout(designName, layoutData, { sync = true } = {}) {
@@ -45,6 +46,23 @@ function saveViewState(designName, view, { sync = true } = {}) {
 function loadViewState(designName) {
   try { const d = localStorage.getItem(STORAGE_VIEW_KEY_PREFIX + designName); return d ? JSON.parse(d) : null; }
   catch (e) { return null; }
+}
+function saveInlineExpanded(designName, paths, { sync = true } = {}) {
+  try {
+    localStorage.setItem(
+      STORAGE_INLINE_EXPANDED_KEY_PREFIX + designName,
+      JSON.stringify([...paths])
+    );
+  } catch (e) {}
+  if (sync) scheduleSyncToServer(designName);
+}
+function loadInlineExpanded(designName) {
+  try {
+    const data = localStorage.getItem(STORAGE_INLINE_EXPANDED_KEY_PREFIX + designName);
+    return new Set(data ? JSON.parse(data) : []);
+  } catch (e) {
+    return new Set();
+  }
 }
 
 const STORAGE_HIDE_CLK_RST = 'vviz_hide_clk_rst';
@@ -140,6 +158,7 @@ function syncStateToServer(designName, { force = false } = {}) {
     wire_waypoints: state.wireWaypoints?.[designName] || {},
     customizations: normalizeCustomizations(state.customizations?.[designName] || {}),
     tree_expanded: state.treeExpanded?.[designName] ? [...state.treeExpanded[designName]] : [],
+    inline_expanded_paths: state.inlineExpanded?.[designName] ? [...state.inlineExpanded[designName]] : [],
     sidebar_ui: (() => {
       const sb = $('sidebar');
       if (!sb) return undefined;
@@ -244,6 +263,7 @@ const state = {
   activeDesign: null,   // currently selected design in sidebar list
   serverSyncEnabled: {}, // 设计名 -> 是否启用实时同步
   expandedModules: {},  // designName -> Set(modName)
+  inlineExpanded: {},   // designName -> Set(concrete render paths)
   collapsedState: loadCollapsedState(),   // "modName:side:groupLabel" -> bool (true = expanded)
   // Layout overrides per design: { instName: { x, y, width?, height? } }
   layoutOverrides: {},  // designName -> { instName: {...} }
@@ -936,6 +956,10 @@ async function openDesign(name) {
     if (!state.expandedModules[name]) {
       state.expandedModules[name] = new Set();
     }
+    state.inlineExpanded[name] = new Set(
+      Array.isArray(data.inline_expanded_paths) ? data.inline_expanded_paths : []
+    );
+    saveInlineExpanded(name, state.inlineExpanded[name], { sync: false });
 
     // Select first top module to expand (canvas view)
     if (data.top_modules && data.top_modules.length > 0) {
@@ -1127,8 +1151,12 @@ async function renameDesign(oldName) {
       if (val && Object.keys(val).length > 0) saver(trimmed, val, { sync: false });
       try { localStorage.removeItem(STORAGE_KEY_PREFIX.replace(/layout/, lsKeys[0][0]) + oldName); } catch(e) {}
     });
+    const inlinePaths = loadInlineExpanded(oldName);
+    if (inlinePaths.size > 0) {
+      saveInlineExpanded(trimmed, inlinePaths, { sync: false });
+    }
     // Remove old keys explicitly
-    [STORAGE_KEY_PREFIX, STORAGE_WIRE_KEY_PREFIX, STORAGE_VIEW_KEY_PREFIX, STORAGE_CUSTOM_PREFIX].forEach(pfx => {
+    [STORAGE_KEY_PREFIX, STORAGE_WIRE_KEY_PREFIX, STORAGE_VIEW_KEY_PREFIX, STORAGE_CUSTOM_PREFIX, STORAGE_INLINE_EXPANDED_KEY_PREFIX].forEach(pfx => {
       try { localStorage.removeItem(pfx + oldName); } catch(e) {}
     });
     // Update in-memory state
@@ -1147,6 +1175,10 @@ async function renameDesign(oldName) {
     if (state.customizations[oldName]) {
       state.customizations[trimmed] = state.customizations[oldName];
       delete state.customizations[oldName];
+    }
+    if (state.inlineExpanded[oldName]) {
+      state.inlineExpanded[trimmed] = state.inlineExpanded[oldName];
+      delete state.inlineExpanded[oldName];
     }
     state.openTabs = state.openTabs.map(t => t.name === oldName ? { ...t, name: trimmed } : t);
     if (state.activeTab === oldName) state.activeTab = trimmed;
@@ -1172,7 +1204,21 @@ async function deleteDesign(name) {
     await fetch(`/api/delete/${name}`, { method: 'DELETE' });
     delete state.designs[name];
     delete state.expandedModules[name];
+    delete state.inlineExpanded[name];
+    delete state.layoutOverrides[name];
+    delete state.wireWaypoints[name];
+    delete state.customizations[name];
+    delete state.treeExpanded[name];
     delete state.serverSyncEnabled[name];
+    [
+      STORAGE_KEY_PREFIX,
+      STORAGE_WIRE_KEY_PREFIX,
+      STORAGE_VIEW_KEY_PREFIX,
+      STORAGE_CUSTOM_PREFIX,
+      STORAGE_INLINE_EXPANDED_KEY_PREFIX,
+    ].forEach(prefix => {
+      try { localStorage.removeItem(prefix + name); } catch (e) {}
+    });
     state.openTabs = state.openTabs.filter(t => t.name !== name);
     if (state.activeTab === name) {
       state.activeTab = state.openTabs[0]?.name || null;
@@ -1315,7 +1361,12 @@ function _gotoModuleView(designName, modName) {
   if (!tab) return;
   tab.module = modName;
   if (!state.expandedModules[designName]) state.expandedModules[designName] = new Set();
-  state.expandedModules[designName].add(modName);
+  const moduleDef = state.designs[designName]?.modules?.[modName];
+  if (moduleDef?.instances?.length) {
+    state.expandedModules[designName].add(modName);
+  } else {
+    state.expandedModules[designName].delete(modName);
+  }
   ensureModuleLayout(designName, modName);
   if (designName !== state.activeTab) {
     state.activeTab = designName;
@@ -1392,6 +1443,99 @@ function updateModuleBreadcrumb() {
   }).join('<span class="breadcrumb-sep"> › </span>');
 }
 
+let _treeSingleClickTimer = null;
+let _treeHighlightTimer = null;
+
+function focusCanvasModuleBox(box) {
+  if (!box) return false;
+  const bbox = box.getBBox();
+  const offset = getNestedSvgOffset(box);
+  const centerX = offset.x + bbox.x + bbox.width / 2;
+  const centerY = offset.y + bbox.y + bbox.height / 2;
+  const container = $('canvas-container');
+  if (!container) return false;
+
+  state.zoom = Math.min(Math.max(state.zoom, 0.5), 2);
+  state.pan.x = container.clientWidth / 2 - centerX * state.zoom;
+  state.pan.y = container.clientHeight / 2 - centerY * state.zoom;
+  applyTransform();
+  if (state.activeTab) {
+    saveViewState(state.activeTab, { pan: { ...state.pan }, zoom: state.zoom });
+  }
+
+  box.classList.add('highlighted');
+  box.style.transition = 'filter 0.3s';
+  box.style.filter = 'brightness(1.5) drop-shadow(0 0 10px #ffeb3b)';
+  setTimeout(() => {
+    box.style.filter = '';
+    setTimeout(() => {
+      box.classList.remove('highlighted');
+      box.style.transition = '';
+    }, 2000);
+  }, 500);
+  return true;
+}
+
+function highlightTreeTarget(designName, modName, instName, renderPath, label) {
+  const tree = $('module-tree');
+  tree?.querySelectorAll('.tree-node-label.located').forEach(node => {
+    node.classList.remove('located');
+  });
+  label?.classList.add('located');
+  if (_treeHighlightTimer) clearTimeout(_treeHighlightTimer);
+  _treeHighlightTimer = setTimeout(() => {
+    label?.classList.remove('located');
+    _treeHighlightTimer = null;
+  }, 2200);
+
+  const svgRoot = getSVGRoot();
+  let box = renderPath ? getModuleBoxByPath(renderPath) : null;
+  if (!box && instName) {
+    box = [...svgRoot.querySelectorAll(`.module-box[data-instance="${CSS.escape(instName)}"]`)]
+      .find(candidate => candidate.getAttribute('data-module') === modName) || null;
+  }
+  if (!box && !instName) {
+    box = svgRoot.querySelector(`.module-box[data-module="${CSS.escape(modName)}"]`);
+  }
+  if (!focusCanvasModuleBox(box)) {
+    showToast(`模块 "${instName || modName}" 在当前视图中不可见；双击可进入`, 'info');
+  }
+}
+
+function migrateTreeExpandedPaths(designName, modules, topModules) {
+  const expanded = state.treeExpanded[designName];
+  const legacyModuleNames = [...expanded].filter(key => Object.hasOwn(modules, key));
+  if (legacyModuleNames.length === 0) return;
+
+  const pathsByModule = new Map(legacyModuleNames.map(name => [name, []]));
+  const visit = (modName, renderPath, ancestry, depth) => {
+    if (pathsByModule.has(modName)) pathsByModule.get(modName).push(renderPath);
+    if (depth >= 32 || ancestry.has(modName)) return;
+    const nextAncestry = new Set(ancestry);
+    nextAncestry.add(modName);
+    (modules[modName]?.instances || []).forEach(inst => {
+      const childPath = renderPath.endsWith('::')
+        ? `${renderPath}${inst.instance_name}`
+        : `${renderPath}/${inst.instance_name}`;
+      visit(inst.module_type, childPath, nextAncestry, depth + 1);
+    });
+  };
+
+  const roots = topModules.length > 0 ? topModules : Object.keys(modules);
+  roots.forEach(modName => visit(modName, `${modName}::`, new Set(), 0));
+  legacyModuleNames.forEach(modName => {
+    expanded.delete(modName);
+    pathsByModule.get(modName).forEach(renderPath => expanded.add(renderPath));
+  });
+  scheduleSyncToServer(designName);
+}
+
+function hasTreeTextSelection(node) {
+  const selection = window.getSelection?.();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+  return node.contains(selection.anchorNode) || node.contains(selection.focusNode);
+}
+
 function renderSidebar(designName) {
   const tree = $('module-tree');
   tree.innerHTML = '';
@@ -1411,6 +1555,7 @@ function renderSidebar(designName) {
       }
     }
   }
+  migrateTreeExpandedPaths(designName, modules, topModules);
 
   // ── Search input ──
   const searchRow = document.createElement('div');
@@ -1435,11 +1580,11 @@ function renderSidebar(designName) {
   searchRow.appendChild(searchInput);
   tree.appendChild(searchRow);
 
-  // createNode(modName, depth, instName)
+  // createNode(modName, depth, instName, renderPath, parentTreeKey)
   //   modName  — the module type (used for children lookup, expansion state, canvas navigation)
   //   depth    — indentation level
   //   instName — the specific instance name to display (null for top-level type entries)
-  const createNode = (modName, depth, instName = null) => {
+  const createNode = (modName, depth, instName = null, renderPath = `${modName}::`, parentTreeKey = '') => {
     const mod = modules[modName];
     if (!mod) return;
 
@@ -1447,11 +1592,14 @@ function renderSidebar(designName) {
     label.className = 'tree-node-label';
     label.setAttribute('data-mod-name', modName);
     if (instName) label.setAttribute('data-inst-name', instName);
+    label.setAttribute('data-tree-key', renderPath);
+    if (parentTreeKey) label.setAttribute('data-parent-tree-key', parentTreeKey);
     label.setAttribute('tabindex', '0');
+    label.setAttribute('role', 'treeitem');
     label.style.paddingLeft = (depth * 16 + 4) + 'px';
 
     // Use treeExpanded (sidebar tree state) for showing children
-    const treeExp = state.treeExpanded[designName]?.has(modName);
+    const treeExp = state.treeExpanded[designName]?.has(renderPath);
     const hasChildren = mod.instances && mod.instances.length > 0;
     const isTop = !instName && topModules.includes(modName);
 
@@ -1465,72 +1613,115 @@ function renderSidebar(designName) {
     const typeHint = (instName && instName !== modName)
       ? `<span class="tree-type-hint">:${modName}</span>` : '';
 
+    const toggleMarkup = hasChildren
+      ? `<button type="button" class="tree-node-toggle" aria-label="${treeExp ? '收起' : '展开'} ${displayName}" aria-expanded="${treeExp ? 'true' : 'false'}" title="${treeExp ? '收起' : '展开'}"><span aria-hidden="true">${treeExp ? '▼' : '▶'}</span></button>`
+      : '<span class="tree-node-toggle-placeholder" aria-hidden="true">·</span>';
     label.innerHTML = `
-      <span class="icon">${hasChildren ? (treeExp ? '▼' : '▶') : '·'}</span>
-      <span style="${isTop ? 'color:#58a6ff;font-weight:600;' : ''}">${displayName}</span>
-      ${typeHint}
-      <span style="color:#484f58;font-size:11px;margin-left:auto;">${mod.ports?.length || 0}p</span>`;
+      ${toggleMarkup}
+      <span class="tree-node-main" title="单击高亮，双击进入模块">
+        <span class="tree-node-name" style="${isTop ? 'color:#58a6ff;font-weight:600;' : ''}">${displayName}</span>
+        ${typeHint}
+        <span class="tree-node-port-count">${mod.ports?.length || 0}p</span>
+      </span>`;
 
-    label.addEventListener('click', () => {
-      const tab2 = state.openTabs.find(t => t.name === designName);
-      const svgRoot = getSVGRoot();
-      // Prefer navigating to specific instance box when instName is known
-      const boxes = instName
-        ? svgRoot.querySelectorAll(`.module-box[data-instance="${instName}"]`)
-        : svgRoot.querySelectorAll(`.module-box[data-module="${modName}"]`);
-      if (boxes.length > 0) {
-        // Visible in current view: pan to it
-        if (instName) {
-          navigateToInstance(designName, instName);
-        } else {
-          navigateToModule(designName, modName);
+    const toggle = label.querySelector('.tree-node-toggle');
+    if (toggle) {
+      const activateToggle = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (_treeSingleClickTimer) {
+          clearTimeout(_treeSingleClickTimer);
+          _treeSingleClickTimer = null;
         }
-      } else if (hasChildren) {
-        // Navigate into this module's internal view
-        navigateToModuleView(designName, modName);
-      } else {
-        // Leaf module: navigate to the parent module's view then highlight instance
-        const parentModName = findParentModule(designName, modName);
-        if (parentModName && tab2) {
-          navigateToModuleView(designName, parentModName);
-          setTimeout(() => {
-            if (instName) navigateToInstance(designName, instName);
-            else navigateToModule(designName, modName);
-          }, 100);
-        } else if (modules[modName]) {
-          navigateToModuleView(designName, modName);
+        const treeExp2 = state.treeExpanded[designName];
+        if (treeExp2.has(renderPath)) treeExp2.delete(renderPath);
+        else treeExp2.add(renderPath);
+        scheduleSyncToServer(designName);
+        renderSidebar(designName);
+        requestAnimationFrame(() => {
+          const nextToggle = tree.querySelector(
+            `.tree-node-label[data-tree-key="${CSS.escape(renderPath)}"] .tree-node-toggle`
+          );
+          nextToggle?.focus();
+        });
+      };
+      toggle.addEventListener('mousedown', e => e.stopPropagation());
+      toggle.addEventListener('click', activateToggle);
+      toggle.addEventListener('dblclick', e => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+    }
+
+    const nodeMain = label.querySelector('.tree-node-main');
+    nodeMain.addEventListener('click', e => {
+      e.stopPropagation();
+      if (hasTreeTextSelection(nodeMain)) {
+        if (_treeSingleClickTimer) {
+          clearTimeout(_treeSingleClickTimer);
+          _treeSingleClickTimer = null;
         }
+        return;
+      }
+      if (_treeSingleClickTimer) clearTimeout(_treeSingleClickTimer);
+      _treeSingleClickTimer = setTimeout(() => {
+        _treeSingleClickTimer = null;
+        highlightTreeTarget(designName, modName, instName, renderPath, label);
+      }, 240);
+    });
+    nodeMain.addEventListener('dblclick', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (_treeSingleClickTimer) {
+        clearTimeout(_treeSingleClickTimer);
+        _treeSingleClickTimer = null;
+      }
+      navigateToModuleView(designName, modName);
+    });
+    label.addEventListener('click', e => {
+      if (e.target === label) nodeMain.click();
+    });
+    label.addEventListener('dblclick', e => {
+      if (e.target !== label) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (_treeSingleClickTimer) {
+        clearTimeout(_treeSingleClickTimer);
+        _treeSingleClickTimer = null;
+      }
+      navigateToModuleView(designName, modName);
+    });
+    label.addEventListener('keydown', e => {
+      if (e.target !== label) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        nodeMain.click();
       }
     });
 
     if (hasChildren) {
-      label.addEventListener('dblclick', (e) => {
-        e.preventDefault();
-        // Double click: toggle sidebar tree expansion for this module type
-        const treeExp2 = state.treeExpanded[designName];
-        if (treeExp2.has(modName)) treeExp2.delete(modName);
-        else treeExp2.add(modName);
-        scheduleSyncToServer(designName);
-        renderSidebar(designName);
-      });
+      label.setAttribute('aria-expanded', treeExp ? 'true' : 'false');
     }
 
     tree.appendChild(label);
 
     // Children: show ALL instances by instance_name (no type deduplication)
-    // Expansion is still controlled by module type in treeExpanded
+    // Expansion is controlled by concrete tree path so repeated module types stay independent.
     if (treeExp && mod.instances) {
       mod.instances.forEach(inst => {
-        createNode(inst.module_type, depth + 1, inst.instance_name);
+        const childPath = renderPath.endsWith('::')
+          ? `${renderPath}${inst.instance_name}`
+          : `${renderPath}/${inst.instance_name}`;
+        createNode(inst.module_type, depth + 1, inst.instance_name, childPath, renderPath);
       });
     }
   };
 
   // Top-level modules use type name only (no instName)
   if (topModules.length > 0) {
-    topModules.forEach(t => createNode(t, 0, null));
+    topModules.forEach(t => createNode(t, 0, null, `${t}::`));
   } else {
-    Object.keys(modules).forEach(m => createNode(m, 0, null));
+    Object.keys(modules).forEach(m => createNode(m, 0, null, `${m}::`));
   }
 
 }
@@ -1561,33 +1752,37 @@ function initTreeKeyboardNav() {
     } else if (e.key === 'ArrowRight') {
       e.preventDefault();
       const mod = focused.getAttribute('data-mod-name');
+      const treeKey = focused.getAttribute('data-tree-key');
       if (mod && modules[mod]?.instances?.length > 0) {
-        if (!state.treeExpanded[designName].has(mod)) {
-          state.treeExpanded[designName].add(mod);
+        if (!state.treeExpanded[designName].has(treeKey)) {
+          state.treeExpanded[designName].add(treeKey);
           scheduleSyncToServer(designName);
           renderSidebar(designName);
-          const newLabel = tree.querySelector(`.tree-node-label[data-mod-name="${mod}"]`);
+          const newLabel = tree.querySelector(
+            `.tree-node-label[data-tree-key="${CSS.escape(treeKey)}"]`
+          );
           if (newLabel) newLabel.focus();
         }
       }
     } else if (e.key === 'ArrowLeft') {
       e.preventDefault();
       const mod = focused.getAttribute('data-mod-name');
-      if (mod && state.treeExpanded[designName].has(mod)) {
-        state.treeExpanded[designName].delete(mod);
+      const treeKey = focused.getAttribute('data-tree-key');
+      if (mod && state.treeExpanded[designName].has(treeKey)) {
+        state.treeExpanded[designName].delete(treeKey);
         scheduleSyncToServer(designName);
         renderSidebar(designName);
-        const newLabel = tree.querySelector(`.tree-node-label[data-mod-name="${mod}"]`);
+        const newLabel = tree.querySelector(
+          `.tree-node-label[data-tree-key="${CSS.escape(treeKey)}"]`
+        );
         if (newLabel) newLabel.focus();
       } else {
-        const parentMod = findParentModule(designName, mod);
-        if (parentMod) {
-          const parentLabel = tree.querySelector(`.tree-node-label[data-mod-name="${parentMod}"]`);
-          if (parentLabel) parentLabel.focus();
-        }
+        const parentTreeKey = focused.getAttribute('data-parent-tree-key');
+        const parentLabel = parentTreeKey
+          ? tree.querySelector(`.tree-node-label[data-tree-key="${CSS.escape(parentTreeKey)}"]`)
+          : null;
+        parentLabel?.focus();
       }
-    } else if (e.key === 'Enter') {
-      focused.click();
     }
   });
 }
@@ -1602,32 +1797,7 @@ function navigateToInstance(designName, instName) {
     showToast(`实例 "${instName}" 在当前视图中不可见`, 'warn');
     return;
   }
-  const transform = box.getAttribute('transform');
-  const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
-  if (!match) return;
-  const modX = parseFloat(match[1]);
-  const modY = parseFloat(match[2]);
-  const rect = box.querySelector('.module-rect');
-  const modW = rect ? parseFloat(rect.getAttribute('width')) : 150;
-  const modH = rect ? parseFloat(rect.getAttribute('height')) : 100;
-  const centerX = modX + modW / 2;
-  const centerY = modY + modH / 2;
-  const container = $('canvas-container');
-  const cw = container.clientWidth;
-  const ch = container.clientHeight;
-  const targetZoom = Math.min(Math.max(state.zoom, 0.5), 2);
-  state.zoom = targetZoom;
-  state.pan.x = cw / 2 - centerX * state.zoom;
-  state.pan.y = ch / 2 - centerY * state.zoom;
-  applyTransform();
-  if (state.activeTab) saveViewState(state.activeTab, { pan: { ...state.pan }, zoom: state.zoom });
-  box.classList.add('highlighted');
-  box.style.transition = 'filter 0.3s';
-  box.style.filter = 'brightness(1.5) drop-shadow(0 0 10px #ffeb3b)';
-  setTimeout(() => {
-    box.style.filter = '';
-    setTimeout(() => { box.classList.remove('highlighted'); box.style.transition = ''; }, 2000);
-  }, 500);
+  focusCanvasModuleBox(box);
 }
 
 /**
@@ -1718,6 +1888,22 @@ function navigateToModule(designName, modName) {
 
 // ─── Canvas Rendering ───────────────────────────────────────────────────
 
+function toggleInlineExpansion(designName, renderPath) {
+  if (!designName || !renderPath) return;
+  if (!state.inlineExpanded[designName]) state.inlineExpanded[designName] = new Set();
+  pushUndoSnapshot();
+  const paths = state.inlineExpanded[designName];
+  if (paths.has(renderPath)) {
+    paths.delete(renderPath);
+  } else {
+    paths.add(renderPath);
+  }
+  saveInlineExpanded(designName, paths);
+  renderCanvas();
+}
+
+let _moduleSingleClickTimer = null;
+
 function renderCanvas() {
   const svgRoot = getSVGRoot();
   const tab = state.openTabs.find(t => t.name === state.activeTab);
@@ -1737,6 +1923,7 @@ function renderCanvas() {
   // Load layout overrides from state (populated from localStorage on openDesign)
   const layoutOvr = state.layoutOverrides[tab.name] || {};
   const wireWps = state.wireWaypoints[tab.name] || {};
+  const inlineExpandedPaths = state.inlineExpanded[tab.name] || new Set();
   state.customizations[tab.name] = normalizeCustomizations(state.customizations[tab.name] || {});
 
   // Clear & render
@@ -1745,6 +1932,7 @@ function renderCanvas() {
     hideClockReset: state.hideClockReset,
     selectedWireKey: state.selectedWireKey,
     customizations: state.customizations[tab.name] || { modules: {}, wires: {} },
+    inlineExpandedPaths,
   });
   svgRoot.appendChild(rootG);
   renderCommentBlocks(rootG, tab.name);
@@ -1759,10 +1947,37 @@ function renderCanvas() {
   svgRoot.querySelectorAll('.module-box').forEach(box => {
     const modName = box.getAttribute('data-module');
     const instName = box.getAttribute('data-instance');
+    const renderPath = box.getAttribute('data-render-path');
+
+    const expandControl = box.querySelector(':scope > .expand-indicator');
+    if (expandControl) {
+      const activate = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (expandControl.getAttribute('data-expansion-blocked') === 'true') return;
+        toggleInlineExpansion(tab.name, renderPath);
+      };
+      expandControl.addEventListener('mousedown', e => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      expandControl.addEventListener('click', activate);
+      expandControl.addEventListener('dblclick', e => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      expandControl.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') activate(e);
+      });
+    }
 
     // Double-click on a sub-module box: navigate INTO that module's internal view
     box.addEventListener('dblclick', e => {
       e.stopPropagation();
+      if (_moduleSingleClickTimer) {
+        clearTimeout(_moduleSingleClickTimer);
+        _moduleSingleClickTimer = null;
+      }
       clearActiveCommentBlock();
       if (!instName) return; // top-level bounding box, no instance
       if (!modName || !modules[modName]?.instances?.length) return; // leaf module
@@ -1799,21 +2014,37 @@ function renderCanvas() {
     box.addEventListener('click', e => {
       if (state.justFinishedDrag) return;
       e.stopPropagation();
-      clearActiveCommentBlock();
-      if (instName) {
-        updateModuleClickSelection(instName, e.shiftKey, e.ctrlKey || e.metaKey);
-      }
-      if (e.shiftKey || e.ctrlKey || e.metaKey) {
-        closeCommentPopup();
-        return;
-      }
-      const customs = state.customizations[tab.name] || { modules: {} };
-      const modCustom = customs.modules?.[instName] || {};
-      if (modCustom.comment) {
-        showCommentPopup(instName, modName, modCustom.comment, e.clientX, e.clientY);
-      } else {
-        closeCommentPopup();
-      }
+      if (_moduleSingleClickTimer) clearTimeout(_moduleSingleClickTimer);
+      const clickInfo = {
+        shiftKey: e.shiftKey,
+        additive: e.ctrlKey || e.metaKey,
+        clientX: e.clientX,
+        clientY: e.clientY,
+      };
+      _moduleSingleClickTimer = setTimeout(() => {
+        _moduleSingleClickTimer = null;
+        clearActiveCommentBlock();
+        if (instName) {
+          updateModuleClickSelection(renderPath, clickInfo.shiftKey, clickInfo.additive);
+        }
+        if (clickInfo.shiftKey || clickInfo.additive) {
+          closeCommentPopup();
+          return;
+        }
+        const customs = state.customizations[tab.name] || { modules: {} };
+        const modCustom = customs.modules?.[instName] || {};
+        if (modCustom.comment) {
+          showCommentPopup(
+            instName,
+            modName,
+            modCustom.comment,
+            clickInfo.clientX,
+            clickInfo.clientY,
+          );
+        } else {
+          closeCommentPopup();
+        }
+      }, 220);
     });
   });
 
@@ -1823,7 +2054,7 @@ function renderCanvas() {
     if (!instName) return; // skip top-level (no instName)
 
     // Drag: mousedown on module header
-    const headerRect = box.querySelector('rect:nth-child(2)'); // header background
+    const headerRect = box.querySelector(':scope > .module-header-primary');
     if (headerRect) {
       headerRect.style.cursor = 'move';
       headerRect.addEventListener('mousedown', e => {
@@ -1963,8 +2194,11 @@ function renderCanvas() {
       e.stopPropagation();
       e.preventDefault();
       if (!wireKey) return;
-      const pt = svgToDesignCoords(e.clientX, e.clientY);
-      if (!pt) return;
+      const localPt = svgToElementCoords(wg, e.clientX, e.clientY);
+      if (!localPt) return;
+      const originX = parseFloat(wg.getAttribute('data-waypoint-origin-x')) || 0;
+      const originY = parseFloat(wg.getAttribute('data-waypoint-origin-y')) || 0;
+      const pt = { x: localPt.x - originX, y: localPt.y - originY };
       pushUndoSnapshot();
       if (!state.wireWaypoints[tab.name]) state.wireWaypoints[tab.name] = {};
       if (!state.wireWaypoints[tab.name][wireKey]) state.wireWaypoints[tab.name][wireKey] = [];
@@ -2277,9 +2511,8 @@ function onCommentBlockDragMove(e) {
     for (const orig of Object.values(t.origPositions)) {
       orig.boxEl?.setAttribute('transform', `translate(${orig.x + dx}, ${orig.y + dy})`);
     }
-    const svgRoot = getSVGRoot();
     for (const orig of Object.values(t.origWaypoints)) {
-      const wp = svgRoot.querySelector(`.wire-waypoint[data-wire-key="${CSS.escape(orig.wireKey)}"][data-wp-index="${orig.idx}"]`);
+      const wp = orig.wpEl;
       if (wp) {
         wp.setAttribute('cx', orig.x + dx);
         wp.setAttribute('cy', orig.y + dy);
@@ -2314,28 +2547,46 @@ function collectCommentBlockContents(block, target) {
   const y2 = y1 + Math.max(50, block.height || 120);
   const svgRoot = getSVGRoot();
   svgRoot.querySelectorAll('.module-box').forEach(box => {
-    const instName = box.getAttribute('data-instance');
-    if (!instName) return;
+    const renderPath = box.getAttribute('data-render-path');
+    if (!renderPath || !box.getAttribute('data-instance')) return;
     const m = box.getAttribute('transform')?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
     if (!m) return;
-    const mx = parseFloat(m[1]);
-    const my = parseFloat(m[2]);
-    const r = box.querySelector('.module-rect');
-    const mw = r ? parseFloat(r.getAttribute('width')) : 150;
-    const mh = r ? parseFloat(r.getAttribute('height')) : 100;
-    const cx = mx + mw / 2;
-    const cy = my + mh / 2;
+    const bounds = getModuleBoxBounds(renderPath);
+    if (!bounds) return;
+    const cx = bounds.x + bounds.width / 2;
+    const cy = bounds.y + bounds.height / 2;
     if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2) {
-      target.origPositions[instName] = { x: mx, y: my, boxEl: box };
+      target.origPositions[renderPath] = {
+        x: parseFloat(m[1]),
+        y: parseFloat(m[2]),
+        boxEl: box,
+        layoutKey: box.getAttribute('data-layout-key') || box.getAttribute('data-instance'),
+        originX: parseFloat(box.getAttribute('data-layout-origin-x')) || 0,
+        originY: parseFloat(box.getAttribute('data-layout-origin-y')) || 0,
+      };
     }
   });
   svgRoot.querySelectorAll('.wire-waypoint').forEach(wp => {
+    const designPoint = getWaypointDesignPoint(wp);
     const x = parseFloat(wp.getAttribute('cx'));
     const y = parseFloat(wp.getAttribute('cy'));
-    if (x >= x1 && x <= x2 && y >= y1 && y <= y2) {
+    if (designPoint.x >= x1 && designPoint.x <= x2
+        && designPoint.y >= y1 && designPoint.y <= y2) {
       const wireKey = wp.getAttribute('data-wire-key');
       const idx = parseInt(wp.getAttribute('data-wp-index'));
-      target.origWaypoints[`${wireKey}:${idx}`] = { x, y, wireKey, idx };
+      const saved = state.wireWaypoints[state.activeTab]?.[wireKey]?.[idx];
+      const renderPath = wp.getAttribute('data-render-path') || wireKey;
+      if (saved) {
+        target.origWaypoints[`${renderPath}:${idx}`] = {
+          x,
+          y,
+          savedX: saved.x,
+          savedY: saved.y,
+          wireKey,
+          idx,
+          wpEl: wp,
+        };
+      }
     }
   });
 }
@@ -2348,18 +2599,21 @@ function persistMovedCommentBlockContents(target, dx, dy) {
   if (hasModules || hasWaypoints) pushUndoSnapshot();
   if (hasModules) {
     if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
-    for (const [instName, orig] of Object.entries(target.origPositions)) {
-      const ovr = state.layoutOverrides[designName][instName] || {};
-      ovr.x = orig.x + dx - 50;
-      ovr.y = orig.y + dy - 50;
-      state.layoutOverrides[designName][instName] = ovr;
+    for (const orig of Object.values(target.origPositions)) {
+      const ovr = state.layoutOverrides[designName][orig.layoutKey] || {};
+      ovr.x = orig.x + dx - orig.originX;
+      ovr.y = orig.y + dy - orig.originY;
+      state.layoutOverrides[designName][orig.layoutKey] = ovr;
     }
     saveLayout(designName, state.layoutOverrides[designName]);
   }
   if (hasWaypoints) {
     for (const orig of Object.values(target.origWaypoints)) {
       if (state.wireWaypoints[designName]?.[orig.wireKey]?.[orig.idx]) {
-        state.wireWaypoints[designName][orig.wireKey][orig.idx] = { x: orig.x + dx, y: orig.y + dy };
+        state.wireWaypoints[designName][orig.wireKey][orig.idx] = {
+          x: orig.savedX + dx,
+          y: orig.savedY + dy,
+        };
       }
     }
     saveWireWaypoints(designName, state.wireWaypoints[designName]);
@@ -2458,12 +2712,92 @@ function startModuleDrag(e, instName, boxEl) {
   state.editMode = 'drag-module';
   state.editTarget = {
     instName,
+    renderPath: boxEl.getAttribute('data-render-path') || instName,
+    layoutKey: boxEl.getAttribute('data-layout-key') || instName,
+    layoutOriginX: parseFloat(boxEl.getAttribute('data-layout-origin-x')) || 0,
+    layoutOriginY: parseFloat(boxEl.getAttribute('data-layout-origin-y')) || 0,
     startDesignX: pt.x,
     startDesignY: pt.y,
     origX, origY,
     boxEl,
   };
   $('canvas-container').style.cursor = 'move';
+}
+
+function svgToElementCoords(element, clientX, clientY) {
+  const svg = getSVG();
+  if (!svg || !element?.getScreenCTM) return null;
+  const matrix = element.getScreenCTM();
+  if (!matrix) return null;
+  const point = svg.createSVGPoint();
+  point.x = clientX;
+  point.y = clientY;
+  try {
+    return point.matrixTransform(matrix.inverse());
+  } catch (error) {
+    return null;
+  }
+}
+
+let _inlineAncestorFitFrame = null;
+const _inlineAncestorFitBoxes = new Set();
+
+function fitInlineAncestorsAround(boxEl) {
+  let child = boxEl;
+  let ancestor = child.parentElement?.closest?.('.module-box.inline-expanded');
+  while (ancestor) {
+    const match = child.getAttribute('transform')?.match(
+      /translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/
+    );
+    const childRect = child.querySelector(':scope > .module-rect');
+    const ancestorRect = ancestor.querySelector(':scope > .module-rect');
+    if (match && childRect && ancestorRect) {
+      const childRectX = parseFloat(childRect.getAttribute('x')) || 0;
+      const childRectY = parseFloat(childRect.getAttribute('y')) || 0;
+      const childLeft = parseFloat(match[1]) + childRectX;
+      const childTop = parseFloat(match[2]) + childRectY;
+      const childRight = childLeft + parseFloat(childRect.getAttribute('width'));
+      const childBottom = childTop + parseFloat(childRect.getAttribute('height'));
+      const currentLeft = parseFloat(ancestorRect.getAttribute('x')) || 0;
+      const currentTop = parseFloat(ancestorRect.getAttribute('y')) || 0;
+      const currentRight = currentLeft + parseFloat(ancestorRect.getAttribute('width'));
+      const currentBottom = currentTop + parseFloat(ancestorRect.getAttribute('height'));
+      const nextLeft = Math.min(
+        currentLeft,
+        childLeft - LAYOUT.INLINE_CONTENT_X
+      );
+      const nextTop = Math.min(
+        currentTop,
+        childTop - LAYOUT.MODULE_HEADER_H - LAYOUT.INLINE_CONTENT_Y
+      );
+      const nextRight = Math.max(
+        currentRight,
+        childRight + LAYOUT.INLINE_PAD_RIGHT
+      );
+      const nextBottom = Math.max(
+        currentBottom,
+        childBottom + LAYOUT.INLINE_PAD_BOTTOM
+      );
+      ancestorRect.setAttribute('x', nextLeft);
+      ancestorRect.setAttribute('y', nextTop);
+      ancestorRect.setAttribute('width', nextRight - nextLeft);
+      ancestorRect.setAttribute('height', nextBottom - nextTop);
+    }
+    child = ancestor;
+    ancestor = ancestor.parentElement?.closest?.('.module-box.inline-expanded');
+  }
+}
+
+function scheduleInlineAncestorFit(boxEl) {
+  if (!boxEl) return;
+  _inlineAncestorFitBoxes.add(boxEl);
+  if (_inlineAncestorFitFrame) return;
+  _inlineAncestorFitFrame = requestAnimationFrame(() => {
+    _inlineAncestorFitFrame = null;
+    const boxes = [..._inlineAncestorFitBoxes];
+    _inlineAncestorFitBoxes.clear();
+    boxes.forEach(fitInlineAncestorsAround);
+  });
 }
 
 function onModuleDragMove(e) {
@@ -2478,6 +2812,7 @@ function onModuleDragMove(e) {
 
   // Live preview: move the SVG group
   t.boxEl.setAttribute('transform', `translate(${newX}, ${newY})`);
+  scheduleInlineAncestorFit(t.boxEl);
 }
 
 function onModuleDragEnd(e) {
@@ -2485,29 +2820,34 @@ function onModuleDragEnd(e) {
   if (!t) return;
 
   const pt = svgToDesignCoords(e.clientX, e.clientY);
+  let didMove = false;
   if (pt) {
-    pushUndoSnapshot();
     const dx = pt.x - t.startDesignX;
     const dy = pt.y - t.startDesignY;
+    didMove = Math.hypot(dx, dy) >= 1;
+    if (didMove) pushUndoSnapshot();
     const newX = t.origX + dx;
     const newY = t.origY + dy;
 
-    // Save position to layout overrides (offset by parent internal offset of 50,50)
-    const designName = state.activeTab;
-    if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
-    const ovr = state.layoutOverrides[designName][t.instName] || {};
-    ovr.x = newX - 50; // subtract internal renderModuleInternal offset
-    ovr.y = newY - 50;
-    state.layoutOverrides[designName][t.instName] = ovr;
-    saveLayout(designName, state.layoutOverrides[designName]);
+    if (didMove) {
+      const designName = state.activeTab;
+      if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
+      const ovr = state.layoutOverrides[designName][t.layoutKey] || {};
+      ovr.x = newX - t.layoutOriginX;
+      ovr.y = newY - t.layoutOriginY;
+      state.layoutOverrides[designName][t.layoutKey] = ovr;
+      saveLayout(designName, state.layoutOverrides[designName]);
+    }
   }
 
   state.editMode = null;
   state.editTarget = null;
   $('canvas-container').style.cursor = 'grab';
-  state.justFinishedDrag = true;
-  setTimeout(() => { state.justFinishedDrag = false; }, 50);
-  renderCanvas(); // re-render with wires reconnected
+  if (didMove) {
+    state.justFinishedDrag = true;
+    setTimeout(() => { state.justFinishedDrag = false; }, 50);
+    renderCanvas(); // re-render with wires reconnected
+  }
 }
 
 // ─── Module resize ──────────────────────────────────────────────────────
@@ -2524,6 +2864,7 @@ function startModuleResize(e, instName, boxEl) {
   state.editMode = 'resize-module';
   state.editTarget = {
     instName,
+    layoutKey: boxEl.getAttribute('data-layout-key') || instName,
     startDesignX: pt.x,
     startDesignY: pt.y,
     origW, origH,
@@ -2564,10 +2905,10 @@ function onModuleResizeEnd(e) {
 
     const designName = state.activeTab;
     if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
-    const ovr = state.layoutOverrides[designName][t.instName] || {};
+    const ovr = state.layoutOverrides[designName][t.layoutKey] || {};
     ovr.width = newW;
     ovr.height = newH;
-    state.layoutOverrides[designName][t.instName] = ovr;
+    state.layoutOverrides[designName][t.layoutKey] = ovr;
     saveLayout(designName, state.layoutOverrides[designName]);
   }
 
@@ -2582,7 +2923,7 @@ function onModuleResizeEnd(e) {
 // ─── Wire waypoint drag ────────────────────────────────────────────────
 
 function startWaypointDrag(e, wireKey, wpIdx, wpEl) {
-  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  const pt = svgToElementCoords(wpEl.closest('.module-internal') || wpEl, e.clientX, e.clientY);
   if (!pt) return;
 
   state.editMode = 'drag-waypoint';
@@ -2592,13 +2933,16 @@ function startWaypointDrag(e, wireKey, wpIdx, wpEl) {
     startDesignY: pt.y,
     origX: parseFloat(wpEl.getAttribute('cx')),
     origY: parseFloat(wpEl.getAttribute('cy')),
+    originX: parseFloat(wpEl.getAttribute('data-waypoint-origin-x')) || 0,
+    originY: parseFloat(wpEl.getAttribute('data-waypoint-origin-y')) || 0,
+    coordinateElement: wpEl.closest('.module-internal') || wpEl,
   };
   $('canvas-container').style.cursor = 'move';
 }
 
 function onWaypointDragMove(e) {
   const t = state.editTarget;
-  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  const pt = svgToElementCoords(t.coordinateElement, e.clientX, e.clientY);
   if (!pt || !t) return;
 
   const dx = pt.x - t.startDesignX;
@@ -2611,7 +2955,7 @@ function onWaypointDragEnd(e) {
   const t = state.editTarget;
   if (!t) return;
 
-  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  const pt = svgToElementCoords(t.coordinateElement, e.clientX, e.clientY);
   if (pt) {
     pushUndoSnapshot();
     const dx = pt.x - t.startDesignX;
@@ -2621,7 +2965,10 @@ function onWaypointDragEnd(e) {
 
     const designName = state.activeTab;
     if (state.wireWaypoints[designName]?.[t.wireKey]?.[t.wpIdx]) {
-      state.wireWaypoints[designName][t.wireKey][t.wpIdx] = { x: newX, y: newY };
+      state.wireWaypoints[designName][t.wireKey][t.wpIdx] = {
+        x: newX - t.originX,
+        y: newY - t.originY,
+      };
       saveWireWaypoints(designName, state.wireWaypoints[designName]);
     }
   }
@@ -3059,15 +3406,20 @@ function initPanZoom() {
         const designName = state.activeTab;
         if (designName && state.layoutOverrides[designName]) {
           const svgRoot = getSVGRoot();
-          sel.forEach(instName => {
-            const box = svgRoot?.querySelector(`.module-box[data-instance="${instName}"]`);
+          sel.forEach(renderPath => {
+            const box = svgRoot?.querySelector(
+              `.module-box[data-render-path="${CSS.escape(renderPath)}"]`
+            );
             if (!box) return;
             const m = box.getAttribute('transform')?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
             if (!m) return;
-            const ovr = state.layoutOverrides[designName][instName] || {};
-            ovr.x = parseFloat(m[1]) + dx * step - 50;
-            ovr.y = parseFloat(m[2]) + dy * step - 50;
-            state.layoutOverrides[designName][instName] = ovr;
+            const layoutKey = box.getAttribute('data-layout-key') || box.getAttribute('data-instance');
+            const originX = parseFloat(box.getAttribute('data-layout-origin-x')) || 0;
+            const originY = parseFloat(box.getAttribute('data-layout-origin-y')) || 0;
+            const ovr = state.layoutOverrides[designName][layoutKey] || {};
+            ovr.x = parseFloat(m[1]) + dx * step - originX;
+            ovr.y = parseFloat(m[2]) + dy * step - originY;
+            state.layoutOverrides[designName][layoutKey] = ovr;
           });
           if (state.boxSelection?.queryRect) {
             const qr = state.boxSelection.queryRect;
@@ -3320,6 +3672,7 @@ function pushUndoSnapshot() {
   const snapshot = {
     layoutOverrides: JSON.parse(JSON.stringify(state.layoutOverrides[name] || {})),
     wireWaypoints: JSON.parse(JSON.stringify(state.wireWaypoints[name] || {})),
+    inlineExpandedPaths: [...(state.inlineExpanded[name] || new Set())],
   };
   state.undoStack.push(snapshot);
   if (state.undoStack.length > state.maxUndoHistory) {
@@ -3339,13 +3692,16 @@ function doUndo() {
   state.redoStack.push({
     layoutOverrides: JSON.parse(JSON.stringify(state.layoutOverrides[name] || {})),
     wireWaypoints: JSON.parse(JSON.stringify(state.wireWaypoints[name] || {})),
+    inlineExpandedPaths: [...(state.inlineExpanded[name] || new Set())],
   });
 
   const snapshot = state.undoStack.pop();
   state.layoutOverrides[name] = snapshot.layoutOverrides;
   state.wireWaypoints[name] = snapshot.wireWaypoints;
+  state.inlineExpanded[name] = new Set(snapshot.inlineExpandedPaths || []);
   saveLayout(name, state.layoutOverrides[name]);
   saveWireWaypoints(name, state.wireWaypoints[name]);
+  saveInlineExpanded(name, state.inlineExpanded[name]);
   renderCanvas();
   if (state.selectedWireKey) showWireInfoPanel(state.selectedWireKey, state.selectedWireSignal);
   showToast('已撤销', 'info');
@@ -3361,13 +3717,16 @@ function doRedo() {
   state.undoStack.push({
     layoutOverrides: JSON.parse(JSON.stringify(state.layoutOverrides[name] || {})),
     wireWaypoints: JSON.parse(JSON.stringify(state.wireWaypoints[name] || {})),
+    inlineExpandedPaths: [...(state.inlineExpanded[name] || new Set())],
   });
 
   const snapshot = state.redoStack.pop();
   state.layoutOverrides[name] = snapshot.layoutOverrides;
   state.wireWaypoints[name] = snapshot.wireWaypoints;
+  state.inlineExpanded[name] = new Set(snapshot.inlineExpandedPaths || []);
   saveLayout(name, state.layoutOverrides[name]);
   saveWireWaypoints(name, state.wireWaypoints[name]);
+  saveInlineExpanded(name, state.inlineExpanded[name]);
   renderCanvas();
   if (state.selectedWireKey) showWireInfoPanel(state.selectedWireKey, state.selectedWireSignal);
   showToast('已重做', 'info');
@@ -4040,32 +4399,68 @@ function drawBoxSelectionRect() {
   rect.setAttribute('height', h);
 }
 
-function getModuleBoxBounds(instName) {
+function getModuleBoxByPath(renderPath) {
   const svgRoot = getSVGRoot();
-  const box = svgRoot?.querySelector(`.module-box[data-instance="${CSS.escape(instName)}"]`);
+  return svgRoot?.querySelector(
+    `.module-box[data-render-path="${CSS.escape(renderPath)}"]`
+  ) || null;
+}
+
+function getNestedSvgOffset(element) {
+  let x = 0;
+  let y = 0;
+  let current = element;
+  while (current && current.id !== 'design-root') {
+    if (current.classList?.contains('module-box')) {
+      const match = current.getAttribute('transform')?.match(
+        /translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/
+      );
+      if (match) {
+        x += parseFloat(match[1]);
+        y += parseFloat(match[2]);
+      }
+    }
+    current = current.parentElement;
+  }
+  return { x, y };
+}
+
+function getWaypointDesignPoint(waypoint) {
+  const offset = getNestedSvgOffset(waypoint);
+  return {
+    x: offset.x + parseFloat(waypoint.getAttribute('cx')),
+    y: offset.y + parseFloat(waypoint.getAttribute('cy')),
+  };
+}
+
+function getModuleBoxBounds(renderPath) {
+  const box = getModuleBoxByPath(renderPath);
   if (!box) return null;
-  const transform = box.getAttribute('transform');
-  const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
-  if (!match) return null;
-  const x = parseFloat(match[1]);
-  const y = parseFloat(match[2]);
+  const { x, y } = getNestedSvgOffset(box);
   const rect = box.querySelector('.module-rect');
   const width = rect ? parseFloat(rect.getAttribute('width')) : 150;
   const height = rect ? parseFloat(rect.getAttribute('height')) : 100;
   return { x, y, width, height };
 }
 
-function setModuleSelection(instNames) {
+function normalizeSelectedPaths(paths) {
+  const ordered = [...paths].filter(Boolean).sort((left, right) => left.length - right.length);
+  return new Set(ordered.filter(path => !ordered.some(other => (
+    other !== path && path.startsWith(`${other}/`)
+  ))));
+}
+
+function setModuleSelection(renderPaths) {
   const designName = state.activeTab;
-  const items = new Set([...instNames].filter(Boolean));
+  const items = normalizeSelectedPaths(renderPaths);
   if (!designName || items.size === 0) {
     clearBoxSelection();
     return;
   }
 
   let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
-  items.forEach(instName => {
-    const b = getModuleBoxBounds(instName);
+  items.forEach(renderPath => {
+    const b = getModuleBoxBounds(renderPath);
     if (!b) return;
     x1 = Math.min(x1, b.x);
     y1 = Math.min(y1, b.y);
@@ -4078,9 +4473,11 @@ function setModuleSelection(instNames) {
   }
 
   const snapLayoutOverrides = {};
-  items.forEach(instName => {
-    const ovr = state.layoutOverrides[designName]?.[instName];
-    snapLayoutOverrides[instName] = ovr ? { ...ovr } : null;
+  items.forEach(renderPath => {
+    const layoutKey = getModuleBoxByPath(renderPath)?.getAttribute('data-layout-key');
+    if (!layoutKey) return;
+    const ovr = state.layoutOverrides[designName]?.[layoutKey];
+    snapLayoutOverrides[layoutKey] = ovr ? { ...ovr } : null;
   });
 
   state.boxSelection = {
@@ -4105,24 +4502,24 @@ function setSelectionFromQueryRect(queryRect) {
   const svgRoot = getSVGRoot();
 
   svgRoot.querySelectorAll('.module-box').forEach(box => {
-    const instName = box.getAttribute('data-instance');
-    if (!instName) return;
-    const b = getModuleBoxBounds(instName);
+    const renderPath = box.getAttribute('data-render-path');
+    if (!renderPath || !box.getAttribute('data-instance')) return;
+    const b = getModuleBoxBounds(renderPath);
     if (!b) return;
     const cx = b.x + b.width / 2;
     const cy = b.y + b.height / 2;
     if (cx >= selX1 && cx <= selX2 && cy >= selY1 && cy <= selY2) {
-      selectedModules.add(instName);
+      selectedModules.add(renderPath);
     }
   });
 
   svgRoot.querySelectorAll('.wire-waypoint').forEach(wp => {
-    const x = parseFloat(wp.getAttribute('cx'));
-    const y = parseFloat(wp.getAttribute('cy'));
+    const { x, y } = getWaypointDesignPoint(wp);
     if (x >= selX1 && x <= selX2 && y >= selY1 && y <= selY2) {
       selectedWaypoints.push({
         wireKey: wp.getAttribute('data-wire-key'),
         idx: parseInt(wp.getAttribute('data-wp-index')),
+        renderPath: wp.getAttribute('data-render-path') || '',
       });
     }
   });
@@ -4133,9 +4530,11 @@ function setSelectionFromQueryRect(queryRect) {
   }
 
   const snapLayoutOverrides = {};
-  selectedModules.forEach(name => {
-    const ovr = state.layoutOverrides[designName]?.[name];
-    snapLayoutOverrides[name] = ovr ? { ...ovr } : null;
+  selectedModules.forEach(renderPath => {
+    const layoutKey = getModuleBoxByPath(renderPath)?.getAttribute('data-layout-key');
+    if (!layoutKey) return;
+    const ovr = state.layoutOverrides[designName]?.[layoutKey];
+    snapLayoutOverrides[layoutKey] = ovr ? { ...ovr } : null;
   });
   const snapWireWaypoints = {};
   selectedWaypoints.forEach(wpRef => {
@@ -4160,9 +4559,9 @@ function setSelectionFromQueryRect(queryRect) {
   renderBoxSelectionHighlight();
 }
 
-function updateModuleClickSelection(instName, additive, fillBox) {
+function updateModuleClickSelection(renderPath, additive, fillBox) {
   if (fillBox) {
-    const clicked = getModuleBoxBounds(instName);
+    const clicked = getModuleBoxBounds(renderPath);
     if (!clicked) return;
     const clickedRect = {
       x1: clicked.x,
@@ -4171,7 +4570,7 @@ function updateModuleClickSelection(instName, additive, fillBox) {
       y2: clicked.y + clicked.height,
     };
     const current = state.boxSelection?.queryRect;
-    const clickedAlreadySelected = state.boxSelection?.items?.has(instName);
+    const clickedAlreadySelected = state.boxSelection?.items?.has(renderPath);
     const rect = current
       ? (clickedAlreadySelected ? current : {
           x1: Math.min(current.x1, clickedRect.x1),
@@ -4186,8 +4585,8 @@ function updateModuleClickSelection(instName, additive, fillBox) {
   const selected = additive && state.boxSelection?.items
     ? new Set(state.boxSelection.items)
     : new Set();
-  if (additive && selected.has(instName)) selected.delete(instName);
-  else selected.add(instName);
+  if (additive && selected.has(renderPath)) selected.delete(renderPath);
+  else selected.add(renderPath);
   setModuleSelection(selected);
 }
 
@@ -4218,32 +4617,24 @@ function finalizeBoxSelection() {
   const svgRoot = getSVGRoot();
 
   svgRoot.querySelectorAll('.module-box').forEach(box => {
-    const instName = box.getAttribute('data-instance');
-    if (!instName) return;
-    const transform = box.getAttribute('transform');
-    const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
-    if (!match) return;
-    const mx = parseFloat(match[1]);
-    const my = parseFloat(match[2]);
-    const mRect = box.querySelector('.module-rect');
-    const mw = mRect ? parseFloat(mRect.getAttribute('width')) : 150;
-    const mh = mRect ? parseFloat(mRect.getAttribute('height')) : 100;
-
-    // Check if module center is within selection
-    const cx = mx + mw / 2;
-    const cy = my + mh / 2;
+    const renderPath = box.getAttribute('data-render-path');
+    if (!renderPath || !box.getAttribute('data-instance')) return;
+    const bounds = getModuleBoxBounds(renderPath);
+    if (!bounds) return;
+    const cx = bounds.x + bounds.width / 2;
+    const cy = bounds.y + bounds.height / 2;
     if (cx >= selX1 && cx <= selX2 && cy >= selY1 && cy <= selY2) {
-      selectedModules.add(instName);
+      selectedModules.add(renderPath);
     }
   });
 
   svgRoot.querySelectorAll('.wire-waypoint').forEach(wp => {
-    const wxc = parseFloat(wp.getAttribute('cx'));
-    const wyc = parseFloat(wp.getAttribute('cy'));
+    const { x: wxc, y: wyc } = getWaypointDesignPoint(wp);
     if (wxc >= selX1 && wxc <= selX2 && wyc >= selY1 && wyc <= selY2) {
       selectedWaypoints.push({
         wireKey: wp.getAttribute('data-wire-key'),
         idx: parseInt(wp.getAttribute('data-wp-index')),
+        renderPath: wp.getAttribute('data-render-path') || '',
       });
     }
   });
@@ -4256,9 +4647,11 @@ function finalizeBoxSelection() {
   // Snapshot current layout state so cancel can fully revert
   const designName = state.activeTab;
   const snapLayoutOverrides = {};
-  selectedModules.forEach(instName => {
-    const ovr = state.layoutOverrides[designName]?.[instName];
-    snapLayoutOverrides[instName] = ovr ? { ...ovr } : null;
+  normalizeSelectedPaths(selectedModules).forEach(renderPath => {
+    const layoutKey = getModuleBoxByPath(renderPath)?.getAttribute('data-layout-key');
+    if (!layoutKey) return;
+    const ovr = state.layoutOverrides[designName]?.[layoutKey];
+    snapLayoutOverrides[layoutKey] = ovr ? { ...ovr } : null;
   });
   const snapWireWaypoints = {};
   selectedWaypoints.forEach(wpRef => {
@@ -4268,7 +4661,7 @@ function finalizeBoxSelection() {
     }
   });
   state.boxSelection = {
-    items: selectedModules,
+    items: normalizeSelectedPaths(selectedModules),
     waypoints: selectedWaypoints,
     queryRect: { x1: selX1, y1: selY1, x2: selX2, y2: selY2 },
     snapLayoutOverrides,
@@ -4283,8 +4676,8 @@ function renderBoxSelectionHighlight() {
 
   // Highlight selected modules
   svgRoot.querySelectorAll('.module-box').forEach(box => {
-    const instName = box.getAttribute('data-instance');
-    if (state.boxSelection.items.has(instName)) {
+    const renderPath = box.getAttribute('data-render-path');
+    if (state.boxSelection.items.has(renderPath)) {
       box.classList.add('box-selected');
     } else {
       box.classList.remove('box-selected');
@@ -4295,7 +4688,10 @@ function renderBoxSelectionHighlight() {
   svgRoot.querySelectorAll('.wire-waypoint').forEach(wp => {
     const wk = wp.getAttribute('data-wire-key');
     const idx = parseInt(wp.getAttribute('data-wp-index'));
-    const isSelected = state.boxSelection.waypoints.some(w => w.wireKey === wk && w.idx === idx);
+    const renderPath = wp.getAttribute('data-render-path') || '';
+    const isSelected = state.boxSelection.waypoints.some(w => (
+      w.wireKey === wk && w.idx === idx && w.renderPath === renderPath
+    ));
     if (isSelected) {
       wp.setAttribute('fill', '#ffeb3b');
       wp.setAttribute('r', 7);
@@ -4460,21 +4856,40 @@ function startBoxSelectionDrag(e) {
   // Store original positions of all selected modules
   const svgRoot = getSVGRoot();
   if (state.boxSelection) {
-    state.boxSelection.items.forEach(instName => {
-      const box = svgRoot.querySelector(`.module-box[data-instance="${instName}"]`);
+    state.boxSelection.items.forEach(renderPath => {
+      const box = getModuleBoxByPath(renderPath);
       if (box) {
         const transform = box.getAttribute('transform');
         const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
         if (match) {
-          state.editTarget.origPositions[instName] = { x: parseFloat(match[1]), y: parseFloat(match[2]), boxEl: box };
+          state.editTarget.origPositions[renderPath] = {
+            x: parseFloat(match[1]),
+            y: parseFloat(match[2]),
+            boxEl: box,
+            layoutKey: box.getAttribute('data-layout-key') || box.getAttribute('data-instance'),
+            originX: parseFloat(box.getAttribute('data-layout-origin-x')) || 0,
+            originY: parseFloat(box.getAttribute('data-layout-origin-y')) || 0,
+          };
         }
       }
     });
     state.boxSelection.waypoints.forEach(wpRef => {
-      const key = `${wpRef.wireKey}:${wpRef.idx}`;
+      const key = `${wpRef.renderPath}:${wpRef.idx}`;
       const wps = state.wireWaypoints[state.activeTab]?.[wpRef.wireKey];
-      if (wps?.[wpRef.idx]) {
-        state.editTarget.origWaypoints[key] = { ...wps[wpRef.idx], wireKey: wpRef.wireKey, idx: wpRef.idx };
+      const wpEl = svgRoot.querySelector(
+        `.wire-waypoint[data-render-path="${CSS.escape(wpRef.renderPath)}"][data-wp-index="${wpRef.idx}"]`
+      );
+      if (wps?.[wpRef.idx] && wpEl) {
+        state.editTarget.origWaypoints[key] = {
+          x: parseFloat(wpEl.getAttribute('cx')),
+          y: parseFloat(wpEl.getAttribute('cy')),
+          savedX: wps[wpRef.idx].x,
+          savedY: wps[wpRef.idx].y,
+          wireKey: wpRef.wireKey,
+          renderPath: wpRef.renderPath,
+          idx: wpRef.idx,
+          wpEl,
+        };
       }
     });
   }
@@ -4589,30 +5004,24 @@ function reapplyBoxSelection(queryRect) {
   const svgRoot = getSVGRoot();
 
   svgRoot.querySelectorAll('.module-box').forEach(box => {
-    const instName = box.getAttribute('data-instance');
-    if (!instName) return;
-    const transform = box.getAttribute('transform');
-    const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
-    if (!match) return;
-    const mx = parseFloat(match[1]);
-    const my = parseFloat(match[2]);
-    const mRect = box.querySelector('.module-rect');
-    const mw = mRect ? parseFloat(mRect.getAttribute('width')) : 150;
-    const mh = mRect ? parseFloat(mRect.getAttribute('height')) : 100;
-    const cx = mx + mw / 2;
-    const cy = my + mh / 2;
+    const renderPath = box.getAttribute('data-render-path');
+    if (!renderPath || !box.getAttribute('data-instance')) return;
+    const bounds = getModuleBoxBounds(renderPath);
+    if (!bounds) return;
+    const cx = bounds.x + bounds.width / 2;
+    const cy = bounds.y + bounds.height / 2;
     if (cx >= selX1 && cx <= selX2 && cy >= selY1 && cy <= selY2) {
-      selectedModules.add(instName);
+      selectedModules.add(renderPath);
     }
   });
 
   svgRoot.querySelectorAll('.wire-waypoint').forEach(wp => {
-    const wxc = parseFloat(wp.getAttribute('cx'));
-    const wyc = parseFloat(wp.getAttribute('cy'));
+    const { x: wxc, y: wyc } = getWaypointDesignPoint(wp);
     if (wxc >= selX1 && wxc <= selX2 && wyc >= selY1 && wyc <= selY2) {
       selectedWaypoints.push({
         wireKey: wp.getAttribute('data-wire-key'),
         idx: parseInt(wp.getAttribute('data-wp-index')),
+        renderPath: wp.getAttribute('data-render-path') || '',
       });
     }
   });
@@ -4620,7 +5029,7 @@ function reapplyBoxSelection(queryRect) {
   // Preserve cancel snapshot from the original selection (not from resize changes)
   const prevSnap = state.boxSelection;
   state.boxSelection = {
-    items: selectedModules,
+    items: normalizeSelectedPaths(selectedModules),
     waypoints: selectedWaypoints,
     queryRect,
     snapLayoutOverrides: prevSnap?.snapLayoutOverrides || {},
@@ -4639,11 +5048,12 @@ function onBoxSelectionDragMove(e) {
   // Move all selected modules
   for (const [instName, orig] of Object.entries(t.origPositions)) {
     orig.boxEl.setAttribute('transform', `translate(${orig.x + dx}, ${orig.y + dy})`);
+    scheduleInlineAncestorFit(orig.boxEl);
   }
   // Move all selected waypoints visually
   const svgRoot = getSVGRoot();
   for (const [key, orig] of Object.entries(t.origWaypoints)) {
-    const wp = svgRoot.querySelector(`.wire-waypoint[data-wire-key="${orig.wireKey}"][data-wp-index="${orig.idx}"]`);
+    const wp = orig.wpEl;
     if (wp) {
       wp.setAttribute('cx', orig.x + dx);
       wp.setAttribute('cy', orig.y + dy);
@@ -4669,18 +5079,21 @@ function onBoxSelectionDragEnd(e) {
 
     // Persist module positions
     if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
-    for (const [instName, orig] of Object.entries(t.origPositions)) {
-      const ovr = state.layoutOverrides[designName][instName] || {};
-      ovr.x = orig.x + dx - 50;
-      ovr.y = orig.y + dy - 50;
-      state.layoutOverrides[designName][instName] = ovr;
+    for (const orig of Object.values(t.origPositions)) {
+      const ovr = state.layoutOverrides[designName][orig.layoutKey] || {};
+      ovr.x = orig.x + dx - orig.originX;
+      ovr.y = orig.y + dy - orig.originY;
+      state.layoutOverrides[designName][orig.layoutKey] = ovr;
     }
     saveLayout(designName, state.layoutOverrides[designName]);
 
     // Persist waypoint positions
     for (const [key, orig] of Object.entries(t.origWaypoints)) {
       if (state.wireWaypoints[designName]?.[orig.wireKey]?.[orig.idx]) {
-        state.wireWaypoints[designName][orig.wireKey][orig.idx] = { x: orig.x + dx, y: orig.y + dy };
+        state.wireWaypoints[designName][orig.wireKey][orig.idx] = {
+          x: orig.savedX + dx,
+          y: orig.savedY + dy,
+        };
       }
     }
     saveWireWaypoints(designName, state.wireWaypoints[designName]);
