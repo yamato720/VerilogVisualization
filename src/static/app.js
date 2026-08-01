@@ -27,6 +27,15 @@ function clearLastDesign() {
   try { localStorage.removeItem(STORAGE_LAST_DESIGN_KEY); } catch (e) {}
 }
 
+function getLayoutOverrideForInstance(designName, layoutKey, instanceName = '') {
+  const overrides = state.layoutOverrides[designName] || {};
+  const fallbackKey = instanceName || String(layoutKey || '').split('::').pop();
+  return {
+    ...(fallbackKey ? (overrides[fallbackKey] || {}) : {}),
+    ...(layoutKey ? (overrides[layoutKey] || {}) : {}),
+  };
+}
+
 function saveLayout(designName, layoutData, { sync = true } = {}) {
   try { localStorage.setItem(STORAGE_KEY_PREFIX + designName, JSON.stringify(layoutData)); }
   catch (e) { console.warn('Failed to save layout', e); }
@@ -221,7 +230,7 @@ function updateServerSyncControls() {
     toggle.checked = enabled;
     toggle.disabled = !designName;
     toggle.parentElement.title = designName
-      ? '实时将后续编辑写入设计 JSON'
+      ? '开启时保存当前状态，并将后续编辑写入设计 JSON'
       : '打开设计后可设置实时同步';
   }
   if (saveButton) saveButton.disabled = !designName;
@@ -240,11 +249,19 @@ async function setServerSyncEnabled(enabled) {
   updateServerSyncControls();
 
   try {
-    const response = await fetch('/api/save_state', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: designName, server_sync_enabled: Boolean(enabled) }),
-    });
+    let response;
+    if (enabled) {
+      // 开启同步时先提交当前内存状态，避免旧服务端布局覆盖尚未手动保存的编辑。
+      await syncStateToServer(designName, { force: true });
+    } else {
+      // 关闭同步只写开关，不能把过期坐标一起写回服务端。
+      response = await fetch('/api/save_state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: designName, server_sync_enabled: false }),
+      });
+    }
+    if (!response && enabled) response = { ok: true };
     if (!response.ok) throw new Error(`保存失败 (${response.status})`);
     showToast(
       enabled ? '实时同步已开启' : '实时同步已关闭，后续编辑不会写入 JSON',
@@ -1020,6 +1037,14 @@ async function openDesign(name) {
       state.layoutOverrides[name] = {};
     }
 
+    // 恢复已展开的内联模块时，先为其子实例固定初始坐标，避免首次拉伸触发自动重排。
+    for (const renderPath of [...state.inlineExpanded[name]].sort((left, right) => (
+      left.split('/').length - right.split('/').length
+    ))) {
+      const moduleName = moduleNameForRenderPath(name, renderPath);
+      if (moduleName) ensureModuleLayout(name, moduleName, { sync: false });
+    }
+
     const serverWaypoints = data.wire_waypoints || {};
     const localWaypoints = loadWireWaypoints(name);
     const hasServerWp = Object.keys(serverWaypoints).length > 0;
@@ -1061,8 +1086,9 @@ async function openDesign(name) {
       );
       let added = false;
       for (const [key, pos] of Object.entries(initial)) {
-        if (!state.layoutOverrides[name][key]) {
-          state.layoutOverrides[name][key] = pos;
+        const existing = state.layoutOverrides[name][key] || {};
+        if (existing.x === undefined || existing.y === undefined) {
+          state.layoutOverrides[name][key] = { ...existing, ...pos };
           added = true;
         }
       }
@@ -1346,7 +1372,7 @@ function buildModulePath(designName, targetMod) {
  * Ensure initial layout positions are computed for a module's direct instances.
  * Only fills in positions for instances not yet in layoutOverrides.
  */
-function ensureModuleLayout(designName, modName) {
+function ensureModuleLayout(designName, modName, { sync = true } = {}) {
   const design = state.designs[designName];
   if (!design) return;
   if (typeof computeInitialLayout !== 'function') return;
@@ -1356,12 +1382,13 @@ function ensureModuleLayout(designName, modName) {
   );
   let added = false;
   for (const [key, pos] of Object.entries(initial)) {
-    if (!state.layoutOverrides[designName][key]) {
-      state.layoutOverrides[designName][key] = pos;
+    const existing = state.layoutOverrides[designName][key] || {};
+    if (existing.x === undefined || existing.y === undefined) {
+      state.layoutOverrides[designName][key] = { ...existing, ...pos };
       added = true;
     }
   }
-  if (added) saveLayout(designName, state.layoutOverrides[designName]);
+  if (added) saveLayout(designName, state.layoutOverrides[designName], { sync });
 }
 
 /**
@@ -1923,6 +1950,9 @@ function navigateToModule(designName, modName) {
 function toggleInlineExpansion(designName, renderPath) {
   if (!designName || !renderPath) return;
   if (!state.inlineExpanded[designName]) state.inlineExpanded[designName] = new Set();
+  const box = getModuleBoxByPath(renderPath);
+  const moduleName = box?.getAttribute('data-module');
+  if (moduleName) ensureModuleLayout(designName, moduleName);
   pushUndoSnapshot();
   const paths = state.inlineExpanded[designName];
   if (paths.has(renderPath)) {
@@ -1932,6 +1962,23 @@ function toggleInlineExpansion(designName, renderPath) {
   }
   saveInlineExpanded(designName, paths);
   renderCanvas();
+}
+
+function moduleNameForRenderPath(designName, renderPath) {
+  const design = state.designs[designName];
+  if (!design || !renderPath) return null;
+  const separator = renderPath.indexOf('::');
+  if (separator < 0) return null;
+  let moduleName = renderPath.slice(0, separator);
+  const segments = renderPath.slice(separator + 2).split('/').filter(Boolean);
+  for (const instanceName of segments) {
+    const instance = design.modules[moduleName]?.instances?.find(item => (
+      item.instance_name === instanceName
+    ));
+    if (!instance) return null;
+    moduleName = instance.module_type;
+  }
+  return moduleName;
 }
 
 let _moduleSingleClickTimer = null;
@@ -2593,6 +2640,7 @@ function collectCommentBlockContents(block, target) {
         y: parseFloat(m[2]),
         boxEl: box,
         layoutKey: box.getAttribute('data-layout-key') || box.getAttribute('data-instance'),
+        instanceName: box.getAttribute('data-instance') || '',
         originX: parseFloat(box.getAttribute('data-layout-origin-x')) || 0,
         originY: parseFloat(box.getAttribute('data-layout-origin-y')) || 0,
       };
@@ -2632,7 +2680,7 @@ function persistMovedCommentBlockContents(target, dx, dy) {
   if (hasModules) {
     if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
     for (const orig of Object.values(target.origPositions)) {
-      const ovr = state.layoutOverrides[designName][orig.layoutKey] || {};
+      const ovr = getLayoutOverrideForInstance(designName, orig.layoutKey, orig.instanceName);
       ovr.x = orig.x + dx - orig.originX;
       ovr.y = orig.y + dy - orig.originY;
       state.layoutOverrides[designName][orig.layoutKey] = ovr;
@@ -2864,7 +2912,7 @@ function onModuleDragEnd(e) {
     if (didMove) {
       const designName = state.activeTab;
       if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
-      const ovr = state.layoutOverrides[designName][t.layoutKey] || {};
+      const ovr = getLayoutOverrideForInstance(designName, t.layoutKey, t.instName);
       ovr.x = newX - t.layoutOriginX;
       ovr.y = newY - t.layoutOriginY;
       state.layoutOverrides[designName][t.layoutKey] = ovr;
@@ -2937,7 +2985,7 @@ function onModuleResizeEnd(e) {
 
     const designName = state.activeTab;
     if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
-    const ovr = state.layoutOverrides[designName][t.layoutKey] || {};
+    const ovr = getLayoutOverrideForInstance(designName, t.layoutKey, t.instName);
     ovr.width = newW;
     ovr.height = newH;
     state.layoutOverrides[designName][t.layoutKey] = ovr;
@@ -3446,9 +3494,10 @@ function initPanZoom() {
             const m = box.getAttribute('transform')?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
             if (!m) return;
             const layoutKey = box.getAttribute('data-layout-key') || box.getAttribute('data-instance');
+            const instanceName = box.getAttribute('data-instance') || '';
             const originX = parseFloat(box.getAttribute('data-layout-origin-x')) || 0;
             const originY = parseFloat(box.getAttribute('data-layout-origin-y')) || 0;
-            const ovr = state.layoutOverrides[designName][layoutKey] || {};
+            const ovr = getLayoutOverrideForInstance(designName, layoutKey, instanceName);
             ovr.x = parseFloat(m[1]) + dx * step - originX;
             ovr.y = parseFloat(m[2]) + dy * step - originY;
             state.layoutOverrides[designName][layoutKey] = ovr;
@@ -4899,6 +4948,7 @@ function startBoxSelectionDrag(e) {
             y: parseFloat(match[2]),
             boxEl: box,
             layoutKey: box.getAttribute('data-layout-key') || box.getAttribute('data-instance'),
+            instanceName: box.getAttribute('data-instance') || '',
             originX: parseFloat(box.getAttribute('data-layout-origin-x')) || 0,
             originY: parseFloat(box.getAttribute('data-layout-origin-y')) || 0,
           };
@@ -5112,7 +5162,7 @@ function onBoxSelectionDragEnd(e) {
     // Persist module positions
     if (!state.layoutOverrides[designName]) state.layoutOverrides[designName] = {};
     for (const orig of Object.values(t.origPositions)) {
-      const ovr = state.layoutOverrides[designName][orig.layoutKey] || {};
+      const ovr = getLayoutOverrideForInstance(designName, orig.layoutKey, orig.instanceName);
       ovr.x = orig.x + dx - orig.originX;
       ovr.y = orig.y + dy - orig.originY;
       state.layoutOverrides[designName][orig.layoutKey] = ovr;

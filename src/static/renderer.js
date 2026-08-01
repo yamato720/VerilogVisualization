@@ -63,9 +63,11 @@ function childRenderPath(parentPath, instanceName) {
 }
 
 function getLayoutOverride(layoutOverrides, parentModuleName, instanceName) {
-  return layoutOverrides?.[scopedLayoutKey(parentModuleName, instanceName)]
-    || layoutOverrides?.[instanceName]
-    || null;
+  const scoped = layoutOverrides?.[scopedLayoutKey(parentModuleName, instanceName)] || null;
+  const legacy = layoutOverrides?.[instanceName] || null;
+  if (!scoped && !legacy) return null;
+  // 合并旧版未加作用域的坐标和新版作用域属性，避免拉伸后丢失原位置。
+  return { ...(legacy || {}), ...(scoped || {}) };
 }
 
 // ─── Port grouping (Vivado-style collapse) ─────────────────────────────
@@ -1529,8 +1531,15 @@ function computeInitialLayout(topModName, allModules, collapsedState, existingOv
     },
   );
   layout.forEach(item => {
-    if (!existingOverrides?.[item.layoutKey] && !existingOverrides?.[item.instance.instance_name]) {
-      result[item.layoutKey] = { x: item.baseX ?? item.x, y: item.baseY ?? item.y };
+    const scoped = existingOverrides?.[item.layoutKey] || {};
+    const legacy = existingOverrides?.[item.instance.instance_name] || {};
+    if (scoped.x === undefined || scoped.y === undefined) {
+      result[item.layoutKey] = {
+        ...legacy,
+        ...scoped,
+        x: scoped.x ?? legacy.x ?? item.baseX ?? item.x,
+        y: scoped.y ?? legacy.y ?? item.baseY ?? item.y,
+      };
     }
   });
   return result;
