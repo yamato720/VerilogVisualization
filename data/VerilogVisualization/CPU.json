@@ -1,7 +1,7 @@
 {
   "source_path": "/home/pyx/ysyx-workbench/npc/constructions/npc.PipelinedTwoCycleWideL2SimulationConfig/abi/rtl",
   "save_path": "/home/pyx/ysyx-workbench/npc/VerilogVisualization/data/VerilogVisualization/CPU.json",
-  "layout_revision": 1,
+  "layout_revision": 2,
   "server_sync_enabled": false,
   "source_files": [
     "/home/pyx/ysyx-workbench/npc/constructions/npc.PipelinedTwoCycleWideL2SimulationConfig/abi/rtl/CPU.sv"
