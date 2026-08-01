@@ -128,63 +128,89 @@ function main() {
       .filter(module => (module.instances || []).length > 1)
       .map(module => module.name);
   const issues = [];
+  const inlineExpandedPaths = new Set(design.inline_expanded_paths || []);
+  let checkedScopes = 0;
 
   selectedParents.forEach(parentName => {
     const parent = design.modules?.[parentName];
     if (!parent) fail(`找不到父模块: ${parentName}`);
     const root = renderModuleInternal(
       parent, design.modules, 50, 50, {}, design.layout || {}, design.wire_waypoints || {},
-      { hideClockReset: !showClockReset, customizations: { modules: {}, wires: {} } },
+      {
+        hideClockReset: !showClockReset,
+        customizations: { modules: {}, wires: {} },
+        inlineExpandedPaths,
+        parentPath: `${parent.name}::`,
+        ancestry: [parent.name],
+        depth: 0,
+      },
     );
-    const wireLayer = root.children.find(child => child.attrs.class === 'wire-layer');
-    const boxes = layoutInstances(parent.instances || [], design.modules || {}, {}, design.layout || {}, !showClockReset)
-      .map(item => ({
-        name: item.instance.instance_name,
-        x: item.x + 50,
-        y: item.y + 50,
-        width: item.size.width,
-        height: item.size.height,
-      }));
-    const wires = wireLayer?.children || [];
     let localIssues = 0;
+    let localWireCount = 0;
 
-    wires.forEach(wire => {
-      const wireKey = wire.attrs['data-wire-key'] || '(未命名线路)';
-      const pathElement = wire.children.find(child => child.tag === 'path');
-      const segments = nonZeroSegments(parsePath(pathElement?.attrs.d || ''));
-      if (segments.length === 0) {
-        issues.push(`${parentName}: ${wireKey} 没有可见路径`);
-        localIssues += 1;
-        return;
-      }
-      const first = segments[0];
-      const last = segments[segments.length - 1];
-      if (first[0].y !== first[1].y || first[1].x <= first[0].x) {
-        issues.push(`${parentName}: ${wireKey} 未从右侧输出端水平引出`);
-        localIssues += 1;
-      }
-      if (last[0].y !== last[1].y || last[1].x <= last[0].x) {
-        issues.push(`${parentName}: ${wireKey} 未从左侧水平进入输入端`);
-        localIssues += 1;
-      }
-      segments.forEach(([from, to]) => {
-        if (from.x !== to.x && from.y !== to.y) {
-          issues.push(`${parentName}: ${wireKey} 存在非正交线段`);
+    function checkInternalScope(internal, scopeName) {
+      checkedScopes += 1;
+      const wireLayer = internal.children.find(child => child.attrs.class === 'wire-layer');
+      const moduleLayer = internal.children.find(child => child.attrs.class === 'module-layer');
+      const boxes = (moduleLayer?.children || []).map(box => {
+        const match = (box.attrs.transform || '').match(
+          /translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/
+        );
+        const rect = box.querySelector('.module-rect');
+        return {
+          name: box.attrs['data-instance'],
+          x: Number(match?.[1] || 0),
+          y: Number(match?.[2] || 0),
+          width: Number(rect?.attrs.width || 0),
+          height: Number(rect?.attrs.height || 0),
+        };
+      });
+      const wires = wireLayer?.children || [];
+      localWireCount += wires.length;
+      wires.forEach(wire => {
+        const wireKey = wire.attrs['data-wire-key'] || '(未命名线路)';
+        const pathElement = wire.children.find(child => child.tag === 'path');
+        const segments = nonZeroSegments(parsePath(pathElement?.attrs.d || ''));
+        if (segments.length === 0) {
+          issues.push(`${scopeName}: ${wireKey} 没有可见路径`);
+          localIssues += 1;
+          return;
+        }
+        const first = segments[0];
+        const last = segments[segments.length - 1];
+        if (first[0].y !== first[1].y || first[1].x <= first[0].x) {
+          issues.push(`${scopeName}: ${wireKey} 未从右侧输出端水平引出`);
           localIssues += 1;
         }
-        boxes.forEach(box => {
-          if (intersectsBox(from, to, box, wireMargin)) {
-            issues.push(`${parentName}: ${wireKey} 穿过 ${box.name}`);
+        if (last[0].y !== last[1].y || last[1].x <= last[0].x) {
+          issues.push(`${scopeName}: ${wireKey} 未从左侧水平进入输入端`);
+          localIssues += 1;
+        }
+        segments.forEach(([from, to]) => {
+          if (from.x !== to.x && from.y !== to.y) {
+            issues.push(`${scopeName}: ${wireKey} 存在非正交线段`);
             localIssues += 1;
           }
+          boxes.forEach(box => {
+            if (intersectsBox(from, to, box, wireMargin)) {
+              issues.push(`${scopeName}: ${wireKey} 穿过 ${box.name}`);
+              localIssues += 1;
+            }
+          });
         });
       });
-    });
-    console.log(`${parentName}: ${wires.length} 条线路，${localIssues} 个布线问题`);
+      (moduleLayer?.children || []).forEach(box => {
+        const nested = box.children.find(child => child.attrs.class === 'module-internal');
+        if (nested) checkInternalScope(nested, `${scopeName}/${box.attrs['data-instance']}`);
+      });
+    }
+
+    checkInternalScope(root, parentName);
+    console.log(`${parentName}: ${localWireCount} 条线路，${localIssues} 个布线问题`);
   });
 
   if (issues.length > 0) fail(issues.join('; '));
-  console.log(`布线检查通过: ${selectedParents.length} 个模块视图的方向与避障均有效`);
+  console.log(`布线检查通过: ${checkedScopes} 个模块作用域的方向与避障均有效`);
 }
 
 main();
