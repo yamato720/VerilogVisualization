@@ -1,8 +1,8 @@
 {
   "source_path": "/home/pyx/ysyx-workbench/npc/constructions/npc.PipelinedTwoCycleWideL2SimulationConfig/abi/rtl",
   "save_path": "/home/pyx/ysyx-workbench/npc/VerilogVisualization/data/VerilogVisualization/CPU.json",
-  "layout_revision": 8,
-  "server_sync_enabled": false,
+  "layout_revision": 9,
+  "server_sync_enabled": true,
   "source_files": [
     "/home/pyx/ysyx-workbench/npc/constructions/npc.PipelinedTwoCycleWideL2SimulationConfig/abi/rtl/CPU.sv"
   ],
@@ -100541,17 +100541,156 @@
     }
   },
   "layout": {
+    "CPU::backend": {
+      "x": 2143.8197271715235,
+      "y": -447.235801527213
+    },
     "CPU::dataCache": {
-      "height": 190,
-      "width": 400,
-      "x": 2500,
-      "y": 2550
+      "height": 159.30218305992048,
+      "width": 312.4880188876292,
+      "x": 4400,
+      "y": 1300
+    },
+    "CPU::faultDpi": {
+      "height": 147.90604170346478,
+      "width": 260.25843876953377,
+      "x": 4400,
+      "y": 1600
+    },
+    "CPU::frontend": {
+      "x": 193.06970963302933,
+      "y": 86.54645344006514
+    },
+    "CPU::instructionCache": {
+      "height": 140.14467613035973,
+      "width": 397.7480345948492,
+      "x": 1800,
+      "y": 1300
     },
     "CPU::maintenance": {
-      "height": 180,
-      "width": 420,
-      "x": 3000,
-      "y": 2550
+      "height": 141.04174515279553,
+      "width": 312.23418770757746,
+      "x": 4850,
+      "y": 1600
+    },
+    "CPU::memoryFabric": {
+      "x": 4850,
+      "y": 1300
+    },
+    "InstructionCache::controller": {
+      "x": 50,
+      "y": 50
+    },
+    "NpcBackend::csrExecution": {
+      "width": 300,
+      "x": 640,
+      "y": 680
+    },
+    "NpcBackend::csrFile": {
+      "width": 320,
+      "x": 40,
+      "y": 680
+    },
+    "NpcBackend::decodeExecuteReg": {
+      "width": 220,
+      "x": 40,
+      "y": 80
+    },
+    "NpcBackend::executeMemoryReg": {
+      "width": 280,
+      "x": 940,
+      "y": 80
+    },
+    "NpcBackend::forwardingUnit": {
+      "width": 320,
+      "x": 440,
+      "y": 1240
+    },
+    "NpcBackend::hazardUnit": {
+      "width": 260,
+      "x": 840,
+      "y": 1240
+    },
+    "NpcBackend::integerAlu": {
+      "width": 220,
+      "x": 640,
+      "y": 80
+    },
+    "NpcBackend::integerExecuteReg": {
+      "width": 220,
+      "x": 340,
+      "y": 80
+    },
+    "NpcBackend::memoryWritebackReg": {
+      "width": 240,
+      "x": 1740,
+      "y": 80
+    },
+    "NpcBackend::mulDivAlu": {
+      "width": 340,
+      "x": 616.6113348901681,
+      "y": 948.5301959272197
+    },
+    "NpcBackend::pipelinedMemoryStage": {
+      "width": 340,
+      "x": 1320,
+      "y": 80
+    },
+    "NpcBackend::registerFile": {
+      "width": 300,
+      "x": 40,
+      "y": 1240
+    },
+    "NpcBackend::serialExecuteControlReg": {
+      "width": 220,
+      "x": 340,
+      "y": 400
+    },
+    "NpcBackend::serialExecuteResultReg": {
+      "width": 260,
+      "x": 940,
+      "y": 400
+    },
+    "NpcBackend::serialIntegerAlu": {
+      "width": 220,
+      "x": 640,
+      "y": 400
+    },
+    "NpcFrontend::decodeUnit": {
+      "x": 840,
+      "y": 50
+    },
+    "NpcFrontend::instructionBuffer": {
+      "x": 50,
+      "y": 50
+    },
+    "NpcFrontend::instructionFetchUnit": {
+      "x": 1256,
+      "y": 50
+    },
+    "NpcFrontend::programCounter": {
+      "x": 522,
+      "y": 50
+    },
+    "NpcMemoryFabric::dataCrossbar": {
+      "x": 812,
+      "y": 50
+    },
+    "NpcMemoryFabric::l2": {
+      "x": 1186,
+      "y": 50
+    },
+    "NpcMemoryFabric::liteArbiter": {
+      "x": 438,
+      "y": 50
+    },
+    "NpcMemoryFabric::mainMemory": {
+      "x": 50,
+      "y": 350
+    },
+    "NpcMemoryFabric::mmioSlave": {
+      "x": 50,
+      "y": 50
     },
     "backend": {
       "x": 500,
@@ -100588,128 +100727,9 @@
     "memoryFabric": {
       "x": 1000,
       "y": 380
-    },
-    "CPU::frontend": {
-      "x": 100,
-      "y": 200
-    },
-    "CPU::backend": {
-      "x": 1850,
-      "y": 200
-    },
-    "CPU::memoryFabric": {
-      "width": 500,
-      "x": 3600,
-      "y": 2550
-    },
-    "CPU::instructionCache": {
-      "height": 180,
-      "width": 520,
-      "x": 400,
-      "y": 800
-    },
-    "CPU::faultDpi": {
-      "height": 180,
-      "width": 360,
-      "x": 5350,
-      "y": 800
-    },
-    "NpcBackend::decodeExecuteReg": {
-      "width": 260,
-      "x": 470,
-      "y": 540
-    },
-    "NpcBackend::integerExecuteReg": {
-      "width": 240,
-      "x": 840,
-      "y": 400
-    },
-    "NpcBackend::serialExecuteControlReg": {
-      "width": 240,
-      "x": 840,
-      "y": 760
-    },
-    "NpcBackend::serialExecuteResultReg": {
-      "width": 300,
-      "x": 1550,
-      "y": 760
-    },
-    "NpcBackend::executeMemoryReg": {
-      "width": 320,
-      "x": 1910,
-      "y": 540
-    },
-    "NpcBackend::memoryWritebackReg": {
-      "width": 300,
-      "x": 2950,
-      "y": 540
-    },
-    "NpcBackend::registerFile": {
-      "width": 330,
-      "x": 60,
-      "y": 320
-    },
-    "NpcBackend::integerAlu": {
-      "width": 260,
-      "x": 1180,
-      "y": 400
-    },
-    "NpcBackend::serialIntegerAlu": {
-      "width": 260,
-      "x": 1180,
-      "y": 760
-    },
-    "NpcBackend::mulDivAlu": {
-      "width": 450,
-      "x": 1180,
-      "y": 1430
-    },
-    "NpcBackend::csrExecution": {
-      "width": 360,
-      "x": 1180,
-      "y": 1060
-    },
-    "NpcBackend::csrFile": {
-      "width": 360,
-      "x": 60,
-      "y": 1060
-    },
-    "NpcBackend::pipelinedMemoryStage": {
-      "width": 520,
-      "x": 2350,
-      "y": 540
-    },
-    "NpcBackend::forwardingUnit": {
-      "width": 360,
-      "x": 470,
-      "y": 1900
-    },
-    "NpcBackend::hazardUnit": {
-      "width": 300,
-      "x": 920,
-      "y": 1900
-    },
-    "NpcFrontend::instructionBuffer": {
-      "width": 340,
-      "x": 760,
-      "y": 180
-    },
-    "NpcFrontend::programCounter": {
-      "width": 200,
-      "x": 50,
-      "y": 210
-    },
-    "NpcFrontend::decodeUnit": {
-      "width": 300,
-      "x": 1200,
-      "y": 145
-    },
-    "NpcFrontend::instructionFetchUnit": {
-      "width": 280,
-      "x": 350,
-      "y": 135
     }
   },
+  "wire_waypoints": {},
   "timeline_dividers": [
     {
       "parent_module": "NpcBackend",
@@ -100731,11 +100751,6 @@
       "parent_module": "NpcBackend",
       "x": 3100
     }
-  ],
-  "wire_waypoints": {},
-  "inline_expanded_paths": [
-    "CPU::frontend",
-    "CPU::backend"
   ],
   "customizations": {
     "modules": {},
@@ -100787,6 +100802,10 @@
     "CPU::memoryFabric/dataCrossbar/writeRoutes",
     "CPU::memoryFabric/l2"
   ],
+  "inline_expanded_paths": [
+    "CPU::backend",
+    "CPU::frontend"
+  ],
   "sidebar_ui": {
     "collapsed": false,
     "tree_fullscreen": false,
@@ -100805,18 +100824,18 @@
   },
   "layout_metrics": {
     "schema_version": 1,
-    "generated_for_layout_revision": 8,
-    "geometry_signature": "1475536:2e7b5d22",
+    "generated_for_layout_revision": 9,
+    "geometry_signature": "1475939:c6643139",
     "scopes": {
       "CPU::": {
         "module": "CPU",
         "bounds": {
-          "min_x": 100,
-          "min_y": 200,
-          "max_x": 5710,
-          "max_y": 2740,
-          "width": 5610,
-          "height": 2540
+          "min_x": 193.06970963302933,
+          "min_y": -447.235801527213,
+          "max_x": 5162.234187707578,
+          "max_y": 1747.9060417034648,
+          "width": 4969.164478074548,
+          "height": 2195.1418432306778
         },
         "instance_count": 7,
         "expanded_instance_count": 2,
@@ -100825,29 +100844,29 @@
             "instance": "frontend",
             "module": "NpcFrontend",
             "layout_key": "CPU::frontend",
-            "x": 100,
-            "y": 200,
-            "width": 1644,
-            "height": 466,
+            "x": 193.06970963302933,
+            "y": 86.54645344006514,
+            "width": 1646,
+            "height": 381,
             "expanded": true
           },
           {
             "instance": "backend",
             "module": "NpcBackend",
             "layout_key": "CPU::backend",
-            "x": 1850,
-            "y": 200,
-            "width": 3394,
-            "height": 2210,
+            "x": 2143.8197271715235,
+            "y": -447.235801527213,
+            "width": 2124,
+            "height": 1550,
             "expanded": true
           },
           {
             "instance": "memoryFabric",
             "module": "NpcMemoryFabric",
             "layout_key": "CPU::memoryFabric",
-            "x": 3600,
-            "y": 2550,
-            "width": 500,
+            "x": 4850,
+            "y": 1300,
+            "width": 239,
             "height": 124,
             "expanded": false
           },
@@ -100855,40 +100874,40 @@
             "instance": "instructionCache",
             "module": "InstructionCache",
             "layout_key": "CPU::instructionCache",
-            "x": 400,
-            "y": 800,
-            "width": 520,
-            "height": 180,
+            "x": 1800,
+            "y": 1300,
+            "width": 397.7480345948492,
+            "height": 140.14467613035973,
             "expanded": false
           },
           {
             "instance": "dataCache",
             "module": "DataCache",
             "layout_key": "CPU::dataCache",
-            "x": 2500,
-            "y": 2550,
-            "width": 400,
-            "height": 190,
+            "x": 4400,
+            "y": 1300,
+            "width": 312.4880188876292,
+            "height": 159.30218305992048,
             "expanded": false
           },
           {
             "instance": "maintenance",
             "module": "CacheMaintenanceController",
             "layout_key": "CPU::maintenance",
-            "x": 3000,
-            "y": 2550,
-            "width": 420,
-            "height": 180,
+            "x": 4850,
+            "y": 1600,
+            "width": 312.23418770757746,
+            "height": 141.04174515279553,
             "expanded": false
           },
           {
             "instance": "faultDpi",
             "module": "MemoryFaultDpi",
             "layout_key": "CPU::faultDpi",
-            "x": 5350,
-            "y": 800,
-            "width": 360,
-            "height": 180,
+            "x": 4400,
+            "y": 1600,
+            "width": 260.25843876953377,
+            "height": 147.90604170346478,
             "expanded": false
           }
         ]
@@ -100897,10 +100916,10 @@
         "module": "NpcFrontend",
         "bounds": {
           "min_x": 50,
-          "min_y": 135,
-          "max_x": 1500,
-          "max_y": 364,
-          "width": 1450,
+          "min_y": 50,
+          "max_x": 1502,
+          "max_y": 279,
+          "width": 1452,
           "height": 229
         },
         "instance_count": 4,
@@ -100910,9 +100929,9 @@
             "instance": "instructionBuffer",
             "module": "InstructionBuffer",
             "layout_key": "NpcFrontend::instructionBuffer",
-            "x": 760,
-            "y": 180,
-            "width": 340,
+            "x": 50,
+            "y": 50,
+            "width": 316,
             "height": 145,
             "expanded": false
           },
@@ -100920,9 +100939,9 @@
             "instance": "programCounter",
             "module": "ProgramCounter",
             "layout_key": "NpcFrontend::programCounter",
-            "x": 50,
-            "y": 210,
-            "width": 200,
+            "x": 522,
+            "y": 50,
+            "width": 162,
             "height": 82,
             "expanded": false
           },
@@ -100930,9 +100949,9 @@
             "instance": "decodeUnit",
             "module": "NpcDecodeUnit",
             "layout_key": "NpcFrontend::decodeUnit",
-            "x": 1200,
-            "y": 145,
-            "width": 300,
+            "x": 840,
+            "y": 50,
+            "width": 260,
             "height": 208,
             "expanded": false
           },
@@ -100940,9 +100959,9 @@
             "instance": "instructionFetchUnit",
             "module": "PipelinedIFetchAXIAdapter",
             "layout_key": "NpcFrontend::instructionFetchUnit",
-            "x": 350,
-            "y": 135,
-            "width": 280,
+            "x": 1256,
+            "y": 50,
+            "width": 246,
             "height": 229,
             "expanded": false
           }
@@ -100951,12 +100970,12 @@
       "CPU::backend": {
         "module": "NpcBackend",
         "bounds": {
-          "min_x": 60,
-          "min_y": 320,
-          "max_x": 3250,
-          "max_y": 2108,
-          "width": 3190,
-          "height": 1788
+          "min_x": 40,
+          "min_y": 80,
+          "max_x": 1980,
+          "max_y": 1448,
+          "width": 1940,
+          "height": 1368
         },
         "instance_count": 15,
         "expanded_instance_count": 0,
@@ -100965,9 +100984,9 @@
             "instance": "decodeExecuteReg",
             "module": "PipelineRegister",
             "layout_key": "NpcBackend::decodeExecuteReg",
-            "x": 470,
-            "y": 540,
-            "width": 260,
+            "x": 40,
+            "y": 80,
+            "width": 220,
             "height": 82,
             "expanded": false
           },
@@ -100975,9 +100994,9 @@
             "instance": "integerExecuteReg",
             "module": "PipelineRegister",
             "layout_key": "NpcBackend::integerExecuteReg",
-            "x": 840,
-            "y": 400,
-            "width": 240,
+            "x": 340,
+            "y": 80,
+            "width": 220,
             "height": 82,
             "expanded": false
           },
@@ -100985,9 +101004,9 @@
             "instance": "serialExecuteControlReg",
             "module": "PipelineRegister",
             "layout_key": "NpcBackend::serialExecuteControlReg",
-            "x": 840,
-            "y": 760,
-            "width": 240,
+            "x": 340,
+            "y": 400,
+            "width": 220,
             "height": 82,
             "expanded": false
           },
@@ -100995,9 +101014,9 @@
             "instance": "serialExecuteResultReg",
             "module": "PipelineRegister_3",
             "layout_key": "NpcBackend::serialExecuteResultReg",
-            "x": 1550,
-            "y": 760,
-            "width": 300,
+            "x": 940,
+            "y": 400,
+            "width": 260,
             "height": 103,
             "expanded": false
           },
@@ -101005,9 +101024,9 @@
             "instance": "executeMemoryReg",
             "module": "PipelineRegister_3",
             "layout_key": "NpcBackend::executeMemoryReg",
-            "x": 1910,
-            "y": 540,
-            "width": 320,
+            "x": 940,
+            "y": 80,
+            "width": 280,
             "height": 103,
             "expanded": false
           },
@@ -101015,9 +101034,9 @@
             "instance": "memoryWritebackReg",
             "module": "PipelineRegister_5",
             "layout_key": "NpcBackend::memoryWritebackReg",
-            "x": 2950,
-            "y": 540,
-            "width": 300,
+            "x": 1740,
+            "y": 80,
+            "width": 240,
             "height": 61,
             "expanded": false
           },
@@ -101025,9 +101044,9 @@
             "instance": "registerFile",
             "module": "RegisterFile",
             "layout_key": "NpcBackend::registerFile",
-            "x": 60,
-            "y": 320,
-            "width": 330,
+            "x": 40,
+            "y": 1240,
+            "width": 300,
             "height": 124,
             "expanded": false
           },
@@ -101035,9 +101054,9 @@
             "instance": "integerAlu",
             "module": "IntegerAlu",
             "layout_key": "NpcBackend::integerAlu",
-            "x": 1180,
-            "y": 400,
-            "width": 260,
+            "x": 640,
+            "y": 80,
+            "width": 220,
             "height": 82,
             "expanded": false
           },
@@ -101045,9 +101064,9 @@
             "instance": "serialIntegerAlu",
             "module": "IntegerAlu",
             "layout_key": "NpcBackend::serialIntegerAlu",
-            "x": 1180,
-            "y": 760,
-            "width": 260,
+            "x": 640,
+            "y": 400,
+            "width": 220,
             "height": 82,
             "expanded": false
           },
@@ -101055,9 +101074,9 @@
             "instance": "mulDivAlu",
             "module": "MulDivAlu",
             "layout_key": "NpcBackend::mulDivAlu",
-            "x": 1180,
-            "y": 1430,
-            "width": 450,
+            "x": 616.6113348901681,
+            "y": 948.5301959272197,
+            "width": 340,
             "height": 166,
             "expanded": false
           },
@@ -101065,9 +101084,9 @@
             "instance": "csrExecution",
             "module": "CsrExecution",
             "layout_key": "NpcBackend::csrExecution",
-            "x": 1180,
-            "y": 1060,
-            "width": 360,
+            "x": 640,
+            "y": 680,
+            "width": 300,
             "height": 208,
             "expanded": false
           },
@@ -101075,9 +101094,9 @@
             "instance": "csrFile",
             "module": "CsrFile",
             "layout_key": "NpcBackend::csrFile",
-            "x": 60,
-            "y": 1060,
-            "width": 360,
+            "x": 40,
+            "y": 680,
+            "width": 320,
             "height": 208,
             "expanded": false
           },
@@ -101085,9 +101104,9 @@
             "instance": "pipelinedMemoryStage",
             "module": "PipelinedMemoryStage",
             "layout_key": "NpcBackend::pipelinedMemoryStage",
-            "x": 2350,
-            "y": 540,
-            "width": 520,
+            "x": 1320,
+            "y": 80,
+            "width": 340,
             "height": 208,
             "expanded": false
           },
@@ -101095,9 +101114,9 @@
             "instance": "forwardingUnit",
             "module": "ForwardingUnit",
             "layout_key": "NpcBackend::forwardingUnit",
-            "x": 470,
-            "y": 1900,
-            "width": 360,
+            "x": 440,
+            "y": 1240,
+            "width": 320,
             "height": 208,
             "expanded": false
           },
@@ -101105,14 +101124,22 @@
             "instance": "hazardUnit",
             "module": "HazardUnit",
             "layout_key": "NpcBackend::hazardUnit",
-            "x": 920,
-            "y": 1900,
-            "width": 300,
+            "x": 840,
+            "y": 1240,
+            "width": 260,
             "height": 103,
             "expanded": false
           }
         ]
       }
     }
+  },
+  "view_state": {
+    "pan": {
+      "x": -66.80924421207737,
+      "y": 293.08105365680854
+    },
+    "zoom": 0.2802781933491642,
+    "module": "CPU"
   }
 }
