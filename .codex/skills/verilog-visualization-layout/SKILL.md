@@ -19,6 +19,12 @@ description: 维护 `npc/VerilogVisualization` 的 RTL 发现、已保存设计 
 
 不要根据 Config 名称、FPGA 类型或目录命名猜测 RTL；始终从保存设计 JSON 的 `source_path` 和实际模块连接出发。
 
+## 参考设计
+
+- 版本库通常提交 `data/VerilogVisualization/CPU.json` 作为可复现的 CPU 布局示例；`.gitignore` 只放行这一份 JSON，其他分析结果仍保持本地生成数据。
+- 该示例不是使用本技能的前置条件。每次使用前先确认文件实际存在；文件可能在其他分支、精简工作区或有意删除的仓库中缺失。
+- 缺失时不得假定其 Config、RTL 路径或布局内容，更不能凭空重建。应枚举现有已保存设计，或以用户指定的设计 JSON 和 `source_path` 为准。
+
 ## 持久化规则
 
 - JSON 是已保存设计的权威状态。打开设计时，已有的 `layout`、`wire_waypoints`、`customizations` 和 `view_state` 必须覆盖旧 `localStorage`。
