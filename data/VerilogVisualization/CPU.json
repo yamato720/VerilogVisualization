@@ -100614,64 +100614,79 @@
       "y": 650
     },
     "NpcBackend::decodeExecuteReg": {
-      "x": 50,
-      "y": 50
+      "width": 220,
+      "x": 40,
+      "y": 80
     },
     "NpcBackend::integerExecuteReg": {
-      "x": 368,
-      "y": 50
+      "width": 220,
+      "x": 340,
+      "y": 80
     },
     "NpcBackend::serialExecuteControlReg": {
-      "x": 686,
-      "y": 50
+      "width": 220,
+      "x": 340,
+      "y": 400
     },
     "NpcBackend::serialExecuteResultReg": {
-      "x": 1004,
-      "y": 50
+      "width": 260,
+      "x": 940,
+      "y": 400
     },
     "NpcBackend::executeMemoryReg": {
-      "x": 50,
-      "y": 203
+      "width": 280,
+      "x": 940,
+      "y": 80
     },
     "NpcBackend::memoryWritebackReg": {
-      "x": 382,
-      "y": 203
+      "width": 240,
+      "x": 1740,
+      "y": 80
     },
     "NpcBackend::registerFile": {
-      "x": 714,
-      "y": 203
+      "width": 300,
+      "x": 40,
+      "y": 1240
     },
     "NpcBackend::integerAlu": {
-      "x": 1053,
-      "y": 203
+      "width": 220,
+      "x": 640,
+      "y": 80
     },
     "NpcBackend::serialIntegerAlu": {
-      "x": 50,
-      "y": 377
+      "width": 220,
+      "x": 640,
+      "y": 400
     },
     "NpcBackend::mulDivAlu": {
-      "x": 396,
-      "y": 377
+      "width": 340,
+      "x": 640,
+      "y": 960
     },
     "NpcBackend::csrExecution": {
-      "x": 833,
-      "y": 377
+      "width": 300,
+      "x": 640,
+      "y": 680
     },
     "NpcBackend::csrFile": {
-      "x": 1242,
-      "y": 377
+      "width": 320,
+      "x": 40,
+      "y": 680
     },
     "NpcBackend::pipelinedMemoryStage": {
-      "x": 50,
-      "y": 635
+      "width": 340,
+      "x": 1320,
+      "y": 80
     },
     "NpcBackend::forwardingUnit": {
-      "x": 466,
-      "y": 635
+      "width": 320,
+      "x": 440,
+      "y": 1240
     },
     "NpcBackend::hazardUnit": {
-      "x": 861,
-      "y": 635
+      "width": 260,
+      "x": 840,
+      "y": 1240
     },
     "NpcFrontend::instructionBuffer": {
       "x": 50,
