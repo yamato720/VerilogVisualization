@@ -82,7 +82,12 @@ function loadCollapsedState() {
   catch (e) { return {}; }
 }
 function saveViewState(designName, view, { sync = true, dirty = sync } = {}) {
-  try { localStorage.setItem(STORAGE_VIEW_KEY_PREFIX + designName, JSON.stringify(view)); }
+  const tab = state.openTabs?.find(item => item.name === designName);
+  const persistedView = view && typeof view === 'object' ? { ...view } : view;
+  if (persistedView && tab?.module && !persistedView.module) {
+    persistedView.module = tab.module;
+  }
+  try { localStorage.setItem(STORAGE_VIEW_KEY_PREFIX + designName, JSON.stringify(persistedView)); }
   catch (e) {}
   if (dirty) markLocalStateDirty(designName, 'view_state');
   if (sync) scheduleSyncToServer(designName);
@@ -90,6 +95,17 @@ function saveViewState(designName, view, { sync = true, dirty = sync } = {}) {
 function loadViewState(designName) {
   try { const d = localStorage.getItem(STORAGE_VIEW_KEY_PREFIX + designName); return d ? JSON.parse(d) : null; }
   catch (e) { return null; }
+}
+function getCurrentViewState(designName) {
+  const tab = state.openTabs?.find(item => item.name === designName);
+  const view = state.activeTab === designName && state.pan
+    ? { pan: { ...state.pan }, zoom: state.zoom }
+    : loadViewState(designName);
+  if (!view) return null;
+  return {
+    ...view,
+    ...(tab?.module ? { module: tab.module } : {}),
+  };
 }
 function saveInlineExpanded(designName, paths, { sync = true, dirty = sync } = {}) {
   try {
@@ -147,7 +163,14 @@ function normalizePersistedField(field, value) {
     const y = Number(value.pan.y);
     const zoom = Number(value.zoom);
     if (![x, y, zoom].every(Number.isFinite)) return null;
-    return { pan: { x, y }, zoom };
+    const module = typeof value.module === 'string' && value.module.trim()
+      ? value.module
+      : null;
+    return {
+      pan: { x, y },
+      zoom,
+      ...(module ? { module } : {}),
+    };
   }
   if (field === 'customizations') return normalizeCustomizations(value || {});
   if (field === 'inline_expanded_paths') {
@@ -408,9 +431,7 @@ function scheduleSyncToServer(designName) {
 function syncStateToServer(designName, { force = false } = {}) {
   if (!designName || (!force && !isServerSyncEnabled(designName))) return Promise.resolve(null);
   const sentRevision = loadLocalSyncMeta(designName).revision;
-  const viewState = (state.activeTab === designName && state.pan)
-    ? { pan: { ...state.pan }, zoom: state.zoom }
-    : (loadViewState(designName) || undefined);
+  const viewState = getCurrentViewState(designName) || undefined;
   const payload = {
     name: designName,
     layout: state.layoutOverrides?.[designName] || {},
@@ -902,9 +923,7 @@ function clonePersistedValue(value) {
 
 function captureRefreshState(designName) {
   const sidebar = $('sidebar');
-  const viewState = state.activeTab === designName && state.pan
-    ? { pan: { ...state.pan }, zoom: state.zoom }
-    : loadViewState(designName);
+  const viewState = getCurrentViewState(designName);
   return {
     layout: clonePersistedValue(state.layoutOverrides?.[designName] || {}),
     wire_waypoints: clonePersistedValue(state.wireWaypoints?.[designName] || {}),
@@ -1408,7 +1427,18 @@ async function openDesign(name, { refreshState = null } = {}) {
     }
 
     // 没有本地待同步视图时才使用 JSON 中的视图状态。
-    const savedView = data.view_state || null;
+    const rawSavedView = data.view_state || null;
+    const fallbackModule = data.top_modules?.[0] || Object.keys(data.modules)[0];
+    const savedModule = typeof rawSavedView?.module === 'string'
+      && data.modules?.[rawSavedView.module]
+      ? rawSavedView.module
+      : fallbackModule;
+    const savedView = rawSavedView
+      ? { ...rawSavedView, ...(savedModule ? { module: savedModule } : {}) }
+      : null;
+    if (data.modules?.[savedModule]?.instances?.length) {
+      state.expandedModules[name].add(savedModule);
+    }
     state.autoFitPending[name] = !savedView;
     if (savedView) {
       state.pan = savedView.pan;
@@ -1423,14 +1453,17 @@ async function openDesign(name, { refreshState = null } = {}) {
     recordLocalServerSnapshot(name, {
       layout: state.layoutOverrides[name],
       wire_waypoints: state.wireWaypoints[name],
-      view_state: data.view_state || null,
+      view_state: savedView,
       customizations: state.customizations[name],
       inline_expanded_paths: [...state.inlineExpanded[name]],
     }, { serverLayoutRevision: localResolution.serverLayoutRevision });
 
-    // Add tab
-    if (!state.openTabs.find(t => t.name === name)) {
-      state.openTabs.push({ name, module: data.top_modules?.[0] || Object.keys(data.modules)[0] });
+    // Add or restore tab. view_state.module records the last viewed hierarchy level.
+    const existingTab = state.openTabs.find(t => t.name === name);
+    if (existingTab) {
+      existingTab.module = savedModule;
+    } else {
+      state.openTabs.push({ name, module: savedModule });
     }
     state.activeTab = name;
     saveLastDesign(name);
@@ -1755,6 +1788,9 @@ function _gotoModuleView(designName, modName) {
   const tab = state.openTabs.find(t => t.name === designName);
   if (!tab) return;
   tab.module = modName;
+  // 模块层级与画布平移/缩放一起持久化，重新打开设计时恢复到当前浏览层级。
+  const view = getCurrentViewState(designName) || { pan: { x: 0, y: 0 }, zoom: 1 };
+  saveViewState(designName, { ...view, module: modName });
   if (!state.expandedModules[designName]) state.expandedModules[designName] = new Set();
   const moduleDef = state.designs[designName]?.modules?.[modName];
   if (moduleDef?.instances?.length) {
