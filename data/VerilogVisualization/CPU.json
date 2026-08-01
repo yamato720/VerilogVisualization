@@ -1,7 +1,7 @@
 {
   "source_path": "/home/pyx/ysyx-workbench/npc/constructions/npc.PipelinedTwoCycleWideL2SimulationConfig/abi/rtl",
   "save_path": "/home/pyx/ysyx-workbench/npc/VerilogVisualization/data/VerilogVisualization/CPU.json",
-  "layout_revision": 5,
+  "layout_revision": 6,
   "server_sync_enabled": false,
   "source_files": [
     "/home/pyx/ysyx-workbench/npc/constructions/npc.PipelinedTwoCycleWideL2SimulationConfig/abi/rtl/CPU.sv"
@@ -100542,16 +100542,16 @@
   },
   "layout": {
     "CPU::dataCache": {
-      "height": 159.30218305992048,
-      "width": 312.4880188876292,
-      "x": 550,
-      "y": 380
+      "height": 190,
+      "width": 400,
+      "x": 5700,
+      "y": 500
     },
     "CPU::maintenance": {
-      "height": 141.04174515279553,
-      "width": 312.23418770757746,
-      "x": 1000,
-      "y": 650
+      "height": 180,
+      "width": 420,
+      "x": 5700,
+      "y": 900
     },
     "backend": {
       "x": 500,
@@ -100590,28 +100590,29 @@
       "y": 380
     },
     "CPU::frontend": {
-      "x": 50,
-      "y": 60
+      "x": 100,
+      "y": 200
     },
     "CPU::backend": {
-      "x": 500,
-      "y": 60
+      "x": 2000,
+      "y": 200
     },
     "CPU::memoryFabric": {
-      "x": 1000,
-      "y": 380
+      "width": 500,
+      "x": 6350,
+      "y": 720
     },
     "CPU::instructionCache": {
-      "height": 140.14467613035973,
-      "width": 397.7480345948492,
-      "x": 50,
-      "y": 380
+      "height": 180,
+      "width": 520,
+      "x": 600,
+      "y": 950
     },
     "CPU::faultDpi": {
-      "height": 147.90604170346478,
-      "width": 260.25843876953377,
-      "x": 450,
-      "y": 650
+      "height": 180,
+      "width": 360,
+      "x": 6350,
+      "y": 1040
     },
     "NpcBackend::decodeExecuteReg": {
       "width": 260,
@@ -100689,20 +100690,24 @@
       "y": 1900
     },
     "NpcFrontend::instructionBuffer": {
-      "x": 50,
-      "y": 50
+      "width": 340,
+      "x": 760,
+      "y": 180
     },
     "NpcFrontend::programCounter": {
-      "x": 522,
-      "y": 50
+      "width": 200,
+      "x": 50,
+      "y": 210
     },
     "NpcFrontend::decodeUnit": {
-      "x": 840,
-      "y": 50
+      "width": 300,
+      "x": 1200,
+      "y": 145
     },
     "NpcFrontend::instructionFetchUnit": {
-      "x": 1256,
-      "y": 50
+      "width": 280,
+      "x": 350,
+      "y": 135
     }
   },
   "timeline_dividers": [
@@ -100728,13 +100733,10 @@
     }
   ],
   "wire_waypoints": {},
-  "view_state": {
-    "pan": {
-      "x": -25.546707981948913,
-      "y": -6.856271213982836
-    },
-    "zoom": 0.6750236627423291
-  },
+  "inline_expanded_paths": [
+    "CPU::frontend",
+    "CPU::backend"
+  ],
   "customizations": {
     "modules": {},
     "wires": {},
@@ -100785,7 +100787,6 @@
     "CPU::memoryFabric/dataCrossbar/writeRoutes",
     "CPU::memoryFabric/l2"
   ],
-  "inline_expanded_paths": [],
   "sidebar_ui": {
     "collapsed": false,
     "tree_fullscreen": false,

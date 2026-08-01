@@ -1120,7 +1120,6 @@ function renderModuleTree(item, x, y, allModules, collapsedState, layoutOverride
         depth: (options.depth || 0) + 1,
         boundaryPorts,
         precomputedLayout: geometry.childLayout,
-        timelineDividers: [],
       },
     );
     const header = render.group.children?.[1] || null;
