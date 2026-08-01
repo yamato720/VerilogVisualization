@@ -360,7 +360,7 @@ def save_state():
         return jsonify({'error': 'Design not found'}), 404
     with open(json_path, 'r', encoding='utf-8') as f:
         design_data = json.load(f)
-    for key in ('layout', 'wire_waypoints', 'view_state', 'customizations', 'tree_expanded', 'inline_expanded_paths', 'sidebar_ui', 'canvas_controls', 'server_sync_enabled'):
+    for key in ('layout', 'wire_waypoints', 'view_state', 'customizations', 'tree_expanded', 'inline_expanded_paths', 'sidebar_ui', 'canvas_controls', 'server_sync_enabled', 'layout_revision'):
         if key in data:
             design_data[key] = data[key]
     with open(json_path, 'w', encoding='utf-8') as f:

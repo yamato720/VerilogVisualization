@@ -225,6 +225,9 @@ function loadLocalSyncMeta(designName) {
     dirtyFields: [...new Set(dirtyFields)],
     revision: Number.isFinite(Number(value.revision)) ? Number(value.revision) : 0,
     updatedAt: Number.isFinite(Number(value.updated_at)) ? Number(value.updated_at) : 0,
+    serverLayoutRevision: Number.isFinite(Number(value.server_layout_revision))
+      ? Number(value.server_layout_revision)
+      : 0,
     serverSignatures: { ...signatures },
   };
 }
@@ -237,6 +240,7 @@ function saveLocalSyncMeta(designName, meta) {
       dirty_fields: [...new Set(meta.dirtyFields || [])],
       revision: meta.revision || 0,
       updated_at: meta.updatedAt || Date.now(),
+      server_layout_revision: meta.serverLayoutRevision || 0,
       server_signatures: meta.serverSignatures || {},
     }));
   } catch (e) {}
@@ -264,7 +268,10 @@ function hasPendingLocalChanges(designName) {
   return Boolean(designName && loadLocalSyncMeta(designName).dirty);
 }
 
-function recordLocalServerSnapshot(designName, snapshot, { preserveDirty = true } = {}) {
+function recordLocalServerSnapshot(designName, snapshot, {
+  preserveDirty = true,
+  serverLayoutRevision,
+} = {}) {
   const meta = loadLocalSyncMeta(designName);
   const nextSignatures = snapshotSignatures(snapshot);
   if (preserveDirty && meta.dirtyFields.length > 0) {
@@ -279,6 +286,9 @@ function recordLocalServerSnapshot(designName, snapshot, { preserveDirty = true 
     meta.serverSignatures = nextSignatures;
     meta.dirty = false;
     meta.dirtyFields = [];
+  }
+  if (Number.isFinite(Number(serverLayoutRevision))) {
+    meta.serverLayoutRevision = Number(serverLayoutRevision);
   }
   meta.updatedAt = Date.now();
   saveLocalSyncMeta(designName, meta);
@@ -297,6 +307,9 @@ function resolveLocalPersistedState(designName, serverData) {
   const resolved = { ...serverState };
   const usedLocalFields = [];
   const allFieldsExplicitlyDirty = meta.dirty && meta.dirtyFields.length === 0;
+  const serverLayoutRevision = Number(serverData.layout_revision);
+  const remoteLayoutRevisionAdvanced = Number.isFinite(serverLayoutRevision)
+    && serverLayoutRevision > meta.serverLayoutRevision;
 
   LOCAL_PERSISTED_FIELDS.forEach(field => {
     const local = localState[field];
@@ -305,9 +318,13 @@ function resolveLocalPersistedState(designName, serverData) {
     const changedSinceBaseline = baselineSignature
       ? persistedStateSignature(local.value) !== baselineSignature
       : !persistedStateEqual(local.value, serverState[field]);
-    const preferLocal = allFieldsExplicitlyDirty
+    const intentionalRemoteLayout = field === 'layout'
+      && remoteLayoutRevisionAdvanced
+      && !meta.dirtyFields.includes('layout')
+      && !allFieldsExplicitlyDirty;
+    const preferLocal = !intentionalRemoteLayout && (allFieldsExplicitlyDirty
       || meta.dirtyFields.includes(field)
-      || changedSinceBaseline;
+      || changedSinceBaseline);
     if (preferLocal) {
       resolved[field] = local.value;
       usedLocalFields.push(field);
@@ -324,10 +341,13 @@ function resolveLocalPersistedState(designName, serverData) {
     meta.updatedAt = Date.now();
     saveLocalSyncMeta(designName, meta);
   } else if (!meta.dirty) {
-    recordLocalServerSnapshot(designName, serverState, { preserveDirty: false });
+    recordLocalServerSnapshot(designName, serverState, {
+      preserveDirty: false,
+      serverLayoutRevision,
+    });
   }
 
-  return { state: resolved, usedLocalFields };
+  return { state: resolved, usedLocalFields, serverLayoutRevision };
 }
 
 const STORAGE_CANVAS_BG = 'vviz_canvas_bg';
@@ -1347,7 +1367,7 @@ async function openDesign(name) {
       view_state: data.view_state || null,
       customizations: state.customizations[name],
       inline_expanded_paths: [...state.inlineExpanded[name]],
-    });
+    }, { serverLayoutRevision: localResolution.serverLayoutRevision });
 
     // Add tab
     if (!state.openTabs.find(t => t.name === name)) {
