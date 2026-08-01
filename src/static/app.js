@@ -573,6 +573,7 @@ const state = {
   // Interactive editing state
   editMode: null,       // null | 'drag-module' | 'resize-module' | 'drag-waypoint'
   editTarget: null,     // context for current edit operation
+  pendingCanvasDrag: null, // 鼠标按下后等待移动阈值的模块/选区拖拽候选
   // Clock/reset visibility
   hideClockReset: loadHideClockReset(),
   // Wire selection
@@ -2354,6 +2355,9 @@ function moduleNameForRenderPath(designName, renderPath) {
 }
 
 let _moduleSingleClickTimer = null;
+const MODULE_DRAG_THRESHOLD = 4;
+const BOX_SELECTION_BORDER_PAD = 10;
+const BOX_SELECTION_HIT_PAD = 30;
 
 function renderCanvas() {
   const svgRoot = getSVGRoot();
@@ -2461,7 +2465,7 @@ function renderCanvas() {
       });
     }
 
-    // 左键只负责更新模块选择框；注释通过右键或设置面板打开。
+    // 左键无实际移动时更新选择框，并显示该模块已有的注释。
     box.addEventListener('click', e => {
       if (state.justFinishedDrag) return;
       e.stopPropagation();
@@ -2478,36 +2482,61 @@ function renderCanvas() {
         if (instName) {
           updateModuleClickSelection(renderPath, clickInfo.shiftKey, clickInfo.additive);
         }
-        closeCommentPopup();
+        if (clickInfo.shiftKey || clickInfo.additive) {
+          closeCommentPopup();
+          return;
+        }
+        const customs = state.customizations[tab.name] || { modules: {} };
+        const modCustom = customs.modules?.[instName] || {};
+        if (modCustom.comment) {
+          showCommentPopup(
+            instName,
+            modName,
+            modCustom.comment,
+            clickInfo.clientX,
+            clickInfo.clientY,
+          );
+        } else {
+          closeCommentPopup();
+        }
       }, 220);
     });
-  });
 
-  // ── Attach module drag handlers (mousedown on header area) ──
-  svgRoot.querySelectorAll('.module-box').forEach(box => {
-    const instName = box.getAttribute('data-instance');
-    if (!instName) return; // skip top-level (no instName)
-
-    // Drag: mousedown on module header
-    const headerRect = box.querySelector(':scope > .module-header-primary');
-    if (headerRect) {
-      headerRect.style.cursor = 'move';
-      headerRect.addEventListener('mousedown', e => {
-        if (e.button !== 0) return;
+    // 选中模块时，从模块任意位置拖动都移动整个选区；按钮和调整手柄保留各自行为。
+    if (instName) {
+      box.addEventListener('mousedown', e => {
+        if (e.button !== 0 || state.editMode || state.pendingCanvasDrag) return;
+        if (e.target.closest?.('.expand-indicator, .module-settings-icon, .resize-handle')) return;
+        const selectedItems = state.boxSelection?.items;
+        const selected = selectedItems && [...selectedItems].some(path => (
+          renderPath === path || renderPath.startsWith(`${path}/`)
+        ));
+        state.pendingCanvasDrag = {
+          kind: selected ? 'selection' : 'module',
+          instName,
+          boxEl: box,
+          clientX: e.clientX,
+          clientY: e.clientY,
+        };
+        // 不在按下时阻止默认行为，以便标题文本仍可被浏览器选取。
         e.stopPropagation();
-        e.preventDefault();
-        clearActiveCommentBlock();
-        startModuleDrag(e, instName, box);
       });
     }
 
-    // 标题用于原生文本选择，不能再被当作模块拖拽起点。
+    // 标题文字保留原生拖选/复制；标题周围的空白区域仍由模块拖拽候选接管。
     const titleText = box.querySelector('.module-title');
     if (titleText) {
       titleText.style.cursor = 'text';
       titleText.addEventListener('mousedown', e => {
         if (e.button !== 0) return;
         e.stopPropagation();
+      });
+      titleText.addEventListener('click', e => {
+        const selection = window.getSelection?.();
+        const selectedTitle = selection && !selection.isCollapsed
+          && (selection.anchorNode === titleText || titleText.contains(selection.anchorNode))
+          && (selection.focusNode === titleText || titleText.contains(selection.focusNode));
+        if (selectedTitle) e.stopPropagation();
       });
     }
   });
@@ -3132,11 +3161,43 @@ function onCommentBlockResizeEnd(e) {
 
 // ─── Module drag ────────────────────────────────────────────────────────
 
-function startModuleDrag(e, instName, boxEl) {
-  const pt = svgToDesignCoords(e.clientX, e.clientY);
-  if (!pt) return;
+function maybeStartPendingCanvasDrag(e) {
+  const pending = state.pendingCanvasDrag;
+  if (!pending) return false;
+  if (e.buttons !== undefined && (e.buttons & 1) === 0) {
+    state.pendingCanvasDrag = null;
+    return false;
+  }
+  const distance = Math.hypot(e.clientX - pending.clientX, e.clientY - pending.clientY);
+  if (distance < MODULE_DRAG_THRESHOLD) return false;
 
-  // Get current module position from the transform attribute
+  state.pendingCanvasDrag = null;
+  clearActiveCommentBlock();
+  const downPoint = { clientX: pending.clientX, clientY: pending.clientY };
+  const selection = window.getSelection?.();
+  if (selection && !selection.isCollapsed) selection.removeAllRanges();
+
+  let started = false;
+  if (pending.kind === 'selection') {
+    started = startBoxSelectionDrag(downPoint);
+    if (started) onBoxSelectionDragMove(e);
+  } else {
+    started = startModuleDrag(downPoint, pending.instName, pending.boxEl, { suppressClick: true });
+    if (started) onModuleDragMove(e);
+  }
+  if (!started) {
+    state.justFinishedDrag = true;
+    setTimeout(() => { state.justFinishedDrag = false; }, 50);
+  }
+  e.preventDefault();
+  return true;
+}
+
+function startModuleDrag(e, instName, boxEl, options = {}) {
+  const pt = svgToDesignCoords(e.clientX, e.clientY);
+  if (!pt) return false;
+
+  // 从 transform 属性读取模块当前坐标，拖拽过程中只修改这一组坐标。
   const transform = boxEl.getAttribute('transform');
   const match = transform?.match(/translate\(\s*([\d.e+-]+)\s*,\s*([\d.e+-]+)\s*\)/);
   const origX = match ? parseFloat(match[1]) : 0;
@@ -3153,8 +3214,11 @@ function startModuleDrag(e, instName, boxEl) {
     startDesignY: pt.y,
     origX, origY,
     boxEl,
+    suppressClick: Boolean(options.suppressClick),
   };
+  boxEl.classList.add('module-dragging');
   $('canvas-container').style.cursor = 'move';
+  return true;
 }
 
 function svgToElementCoords(element, clientX, clientY) {
@@ -3243,7 +3307,7 @@ function onModuleDragMove(e) {
   const newX = t.origX + dx;
   const newY = t.origY + dy;
 
-  // Live preview: move the SVG group
+  // 实时预览模块移动，并同步调整展开模块的祖先边界。
   t.boxEl.setAttribute('transform', `translate(${newX}, ${newY})`);
   scheduleInlineAncestorFit(t.boxEl);
 }
@@ -3273,13 +3337,14 @@ function onModuleDragEnd(e) {
     }
   }
 
+  t.boxEl.classList.remove('module-dragging');
   state.editMode = null;
   state.editTarget = null;
   $('canvas-container').style.cursor = 'grab';
-  if (didMove) {
+  if (didMove || t.suppressClick) {
     state.justFinishedDrag = true;
     setTimeout(() => { state.justFinishedDrag = false; }, 50);
-    renderCanvas(); // re-render with wires reconnected
+    if (didMove) renderCanvas(); // 重新渲染并重新连接线路
   }
 }
 
@@ -3467,7 +3532,7 @@ function updateInfoPanel(modName, modules) {
     ${ioP > 0 ? ` &nbsp;<span class="label">双向:</span> <span class="value" style="color:#ffb74d">${ioP}</span>` : ''}
     &nbsp;<span class="label">子实例:</span> <span class="value">${mod.instances?.length || 0}</span>
     &nbsp;<span class="label">线网:</span> <span class="value">${mod.wires?.length || 0}</span>
-    &nbsp;<span style="color:#484f58;font-size:11px;">| 单击线选中 | 双击线添加拐点 | 右键拐点删除 | 拖拽标题移动 | 右下角调整大小 | 滚轮缩放</span>`;
+    &nbsp;<span style="color:#484f58;font-size:11px;">| 单击线选中 | 双击线添加拐点 | 右键拐点删除 | 拖拽模块移动 | 右下角调整大小 | 滚轮缩放</span>`;
   // Hide waypoint panel when viewing module info
   const wpPanel = $('wp-panel');
   if (wpPanel) wpPanel.style.display = 'none';
@@ -3692,6 +3757,10 @@ function initPanZoom() {
     if (state.editMode === 'resize-comment-block') { onCommentBlockResizeMove(e); return; }
     if (state.editMode === 'drag-box-selection') { onBoxSelectionDragMove(e); return; }
     if (state.editMode === 'resize-box-selection') { onBoxSelectionResizeMove(e); return; }
+    if (state.pendingCanvasDrag) {
+      maybeStartPendingCanvasDrag(e);
+      return;
+    }
     // Box selecting (rubber-band)
     if (state.boxSelecting) {
       const pt = svgToDesignCoords(e.clientX, e.clientY);
@@ -3717,6 +3786,10 @@ function initPanZoom() {
     if (state.editMode === 'resize-comment-block') { onCommentBlockResizeEnd(e); return; }
     if (state.editMode === 'drag-box-selection') { onBoxSelectionDragEnd(e); return; }
     if (state.editMode === 'resize-box-selection') { onBoxSelectionResizeEnd(e); return; }
+    if (state.pendingCanvasDrag) {
+      state.pendingCanvasDrag = null;
+      return;
+    }
     // Box selection end
     if (state.boxSelecting) {
       finalizeBoxSelection();
@@ -5140,28 +5213,34 @@ function renderBoxSelectionHighlight() {
   // Use the stored queryRect as the selection area boundary
   const qr = state.boxSelection.queryRect;
   if (!qr) return;
-  const pad = 10;
-  const bx  = qr.x1 - pad;
-  const by  = qr.y1 - pad;
-  const bx2 = qr.x2 + pad;
-  const by2 = qr.y2 + pad;
+  const bx  = qr.x1 - BOX_SELECTION_BORDER_PAD;
+  const by  = qr.y1 - BOX_SELECTION_BORDER_PAD;
+  const bx2 = qr.x2 + BOX_SELECTION_BORDER_PAD;
+  const by2 = qr.y2 + BOX_SELECTION_BORDER_PAD;
+  const hitX = qr.x1 - BOX_SELECTION_HIT_PAD;
+  const hitY = qr.y1 - BOX_SELECTION_HIT_PAD;
+  const hitX2 = qr.x2 + BOX_SELECTION_HIT_PAD;
+  const hitY2 = qr.y2 + BOX_SELECTION_HIT_PAD;
 
-  // Transparent drag area sits below modules, so selected modules keep click priority.
+  // 扩大的透明命中区位于模块下方，模块本体仍可优先接收点击。
   const hitArea = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
   hitArea.id = 'box-selection-hit-area';
-  hitArea.setAttribute('x', bx);
-  hitArea.setAttribute('y', by);
-  hitArea.setAttribute('width', bx2 - bx);
-  hitArea.setAttribute('height', by2 - by);
+  hitArea.setAttribute('x', hitX);
+  hitArea.setAttribute('y', hitY);
+  hitArea.setAttribute('width', hitX2 - hitX);
+  hitArea.setAttribute('height', hitY2 - hitY);
   hitArea.setAttribute('fill', 'transparent');
   hitArea.setAttribute('stroke', 'none');
   hitArea.setAttribute('pointer-events', 'all');
-  hitArea.style.cursor = 'move';
+  hitArea.style.cursor = 'grab';
   hitArea.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || state.editMode || state.pendingCanvasDrag) return;
     e.stopPropagation();
-    e.preventDefault();
-    startBoxSelectionDrag(e);
+    state.pendingCanvasDrag = {
+      kind: 'selection',
+      clientX: e.clientX,
+      clientY: e.clientY,
+    };
   });
   const underModulesAnchor = [...designRoot.children].find(el => el.classList?.contains('module-internal')) || null;
   designRoot.insertBefore(hitArea, underModulesAnchor);
@@ -5278,7 +5357,7 @@ function clearBoxSelection() {
 
 function startBoxSelectionDrag(e) {
   const pt = svgToDesignCoords(e.clientX, e.clientY);
-  if (!pt) return;
+  if (!pt) return false;
   state.editMode = 'drag-box-selection';
   state.editTarget = {
     startDesignX: pt.x,
@@ -5286,6 +5365,11 @@ function startBoxSelectionDrag(e) {
     origPositions: {},
     origWaypoints: {},
   };
+  state.boxSelection?.items?.forEach(renderPath => {
+    getModuleBoxByPath(renderPath)?.classList.add('module-dragging');
+  });
+  const hitArea = document.getElementById('box-selection-hit-area');
+  if (hitArea) hitArea.style.cursor = 'move';
 
   // Store original positions of all selected modules
   const svgRoot = getSVGRoot();
@@ -5329,6 +5413,7 @@ function startBoxSelectionDrag(e) {
     });
   }
   $('canvas-container').style.cursor = 'move';
+  return true;
 }
 
 function startBoxSelectionResize(e, role) {
@@ -5354,14 +5439,20 @@ function _computeResizedRect(origRect, handle, dx, dy) {
 }
 
 function _updateResizeBorderVisual(x1, y1, x2, y2) {
-  const pad = 10;
-  const bx = x1 - pad, by = y1 - pad, bx2 = x2 + pad, by2 = y2 + pad;
+  const bx = x1 - BOX_SELECTION_BORDER_PAD;
+  const by = y1 - BOX_SELECTION_BORDER_PAD;
+  const bx2 = x2 + BOX_SELECTION_BORDER_PAD;
+  const by2 = y2 + BOX_SELECTION_BORDER_PAD;
   const hitArea = document.getElementById('box-selection-hit-area');
   if (hitArea) {
-    hitArea.setAttribute('x', bx);
-    hitArea.setAttribute('y', by);
-    hitArea.setAttribute('width', bx2 - bx);
-    hitArea.setAttribute('height', by2 - by);
+    const hitX = x1 - BOX_SELECTION_HIT_PAD;
+    const hitY = y1 - BOX_SELECTION_HIT_PAD;
+    const hitX2 = x2 + BOX_SELECTION_HIT_PAD;
+    const hitY2 = y2 + BOX_SELECTION_HIT_PAD;
+    hitArea.setAttribute('x', hitX);
+    hitArea.setAttribute('y', hitY);
+    hitArea.setAttribute('width', hitX2 - hitX);
+    hitArea.setAttribute('height', hitY2 - hitY);
   }
   const border = document.getElementById('box-selection-border');
   if (border) {
@@ -5543,6 +5634,9 @@ function onBoxSelectionDragEnd(e) {
   state.editMode = null;
   state.editTarget = null;
   $('canvas-container').style.cursor = 'grab';
+  getSVGRoot().querySelectorAll('.module-box.module-dragging').forEach(box => {
+    box.classList.remove('module-dragging');
+  });
   state.justFinishedDrag = true;
   setTimeout(() => { state.justFinishedDrag = false; }, 50);
   renderCanvas();

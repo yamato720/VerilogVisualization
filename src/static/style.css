@@ -703,6 +703,8 @@ body {
 /* ============ SVG Module Styles ============ */
 .module-box { cursor: pointer; transition: filter 0.15s; }
 .module-box:hover { filter: brightness(1.15); }
+.module-box.module-dragging,
+.module-box.module-dragging .module-title { cursor: move !important; }
 .module-box.inline-expanded { filter: none; }
 .module-box.inline-expanded:hover { filter: none; }
 .module-box.inline-expanded > .module-rect {
