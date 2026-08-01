@@ -21,9 +21,9 @@ description: 维护 `npc/VerilogVisualization` 的 RTL 发现、已保存设计 
 
 ## 参考设计
 
-- 版本库通常提交 `data/VerilogVisualization/CPU.json` 作为可复现的 CPU 布局示例；`.gitignore` 只放行这一份 JSON，其他分析结果仍保持本地生成数据。
-- 该示例不是使用本技能的前置条件。每次使用前先确认文件实际存在；文件可能在其他分支、精简工作区或有意删除的仓库中缺失。
-- 缺失时不得假定其 Config、RTL 路径或布局内容，更不能凭空重建。应枚举现有已保存设计，或以用户指定的设计 JSON 和 `source_path` 为准。
+- 版本库可提交 `data/VerilogVisualization/CPU.json` 作为 CPU 布局示例；`.gitignore` 只放行这一份 JSON，其他分析结果仍保持本地生成数据。
+- 本技能始终以用户指定的目标设计或当前打开的设计为准。除非任务明确指向 `CPU.json`，或它已经是当前目标，否则不要主动查找、检查、恢复或读取它。
+- 参考示例缺失不影响技能使用；继续基于当前目标 JSON、其 `source_path` 与实际 RTL 连接完成分析和布局。
 
 ## 持久化规则
 
