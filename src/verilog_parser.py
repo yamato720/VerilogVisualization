@@ -663,6 +663,8 @@ def analyze_and_save(source_path: str, data_dir: str, save_name_override: str = 
         'source_path': result['source_path'],
         'save_path':   save_path,
     }
+    if 'layout_revision' in saved_ui_state:
+        ordered_result['layout_revision'] = saved_ui_state['layout_revision']
     if 'server_sync_enabled' in saved_ui_state:
         ordered_result['server_sync_enabled'] = saved_ui_state['server_sync_enabled']
     ordered_result.update({
@@ -672,11 +674,12 @@ def analyze_and_save(source_path: str, data_dir: str, save_name_override: str = 
     })
     ordered_result.update({
         key: value for key, value in saved_ui_state.items()
-        if key != 'server_sync_enabled'
+        if key not in ('server_sync_enabled', 'layout_revision')
     })
 
     with open(save_path, 'w', encoding='utf-8') as f:
         json.dump(ordered_result, f, indent=2, ensure_ascii=False)
+        f.write('\n')
 
     ordered_result['saved_as'] = save_name
     return ordered_result

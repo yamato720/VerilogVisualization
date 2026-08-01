@@ -894,9 +894,56 @@ function toggleFullscreen() {
   }
 }
 
+function clonePersistedValue(value) {
+  if (value === undefined) return undefined;
+  try { return JSON.parse(JSON.stringify(value)); }
+  catch (e) { return value; }
+}
+
+function captureRefreshState(designName) {
+  const sidebar = $('sidebar');
+  const viewState = state.activeTab === designName && state.pan
+    ? { pan: { ...state.pan }, zoom: state.zoom }
+    : loadViewState(designName);
+  return {
+    layout: clonePersistedValue(state.layoutOverrides?.[designName] || {}),
+    wire_waypoints: clonePersistedValue(state.wireWaypoints?.[designName] || {}),
+    view_state: clonePersistedValue(viewState),
+    customizations: clonePersistedValue(
+      normalizeCustomizations(state.customizations?.[designName] || {})
+    ),
+    inline_expanded_paths: state.inlineExpanded?.[designName]
+      ? [...state.inlineExpanded[designName]]
+      : [],
+    tree_expanded: state.treeExpanded?.[designName]
+      ? [...state.treeExpanded[designName]]
+      : undefined,
+    sidebar_ui: sidebar ? {
+      collapsed: sidebar.classList.contains('collapsed'),
+      tree_fullscreen: sidebar.classList.contains('tree-fullscreen'),
+      width: sidebar.dataset.savedWidth
+        || (sidebar.classList.contains('collapsed') ? null : sidebar.style.width)
+        || null,
+    } : undefined,
+    canvas_controls: {
+      wasd_step:      state.canvasControls.wasdStep,
+      zoom_key_in:    state.canvasControls.zoomKeyIn,
+      zoom_key_out:   state.canvasControls.zoomKeyOut,
+      zoom_step_pct:  state.canvasControls.zoomStepPct,
+      help_key:       state.canvasControls.helpKey,
+      fit_key:        state.canvasControls.fitKey,
+      sidebar_key:    state.canvasControls.sidebarKey,
+      tree_full_key:  state.canvasControls.treeFullKey,
+      fullscreen_key: state.canvasControls.fullscreenKey,
+    },
+    server_sync_enabled: isServerSyncEnabled(designName),
+  };
+}
+
 async function refreshDesign() {
   const name = state.activeTab;
   if (!name) { showToast('没有打开的设计', 'warn'); return; }
+  const refreshState = captureRefreshState(name);
   cancelScheduledServerSync(name);
   showToast(`正在刷新 ${name}...`, 'info');
   try {
@@ -907,8 +954,8 @@ async function refreshDesign() {
     });
     const data = await res.json();
     if (data.error) { showToast('刷新失败: ' + data.error, 'error'); return; }
-    // Re-open the design to reload data
-    await openDesign(data.saved_as || name);
+    // 重新解析只更新 RTL 数据，当前内存中的布局和视图状态必须原样保留。
+    await openDesign(data.saved_as || name, { refreshState });
     showToast(`已刷新: ${name}`, 'success');
   } catch (err) {
     showToast('刷新失败: ' + err.message, 'error');
@@ -1217,7 +1264,7 @@ function hideLoadProgress() {
   if (overlay) overlay.style.display = 'none';
 }
 
-async function openDesign(name) {
+async function openDesign(name, { refreshState = null } = {}) {
   showToast(`加载 ${name}...`, 'info');
   showLoadProgress(`加载 ${name}`, 4, '获取设计 JSON...');
   await nextFrame();
@@ -1239,6 +1286,18 @@ async function openDesign(name) {
         customizations: localResolution.state.customizations,
         inline_expanded_paths: localResolution.state.inline_expanded_paths,
       };
+    }
+    if (refreshState) {
+      // 刷新设计不等同于重新打开：模块定义可以来自新 RTL，但 UI 状态来自刷新前的画布。
+      [
+        'layout', 'wire_waypoints', 'view_state', 'customizations',
+        'inline_expanded_paths', 'tree_expanded', 'sidebar_ui',
+        'canvas_controls', 'server_sync_enabled',
+      ].forEach(field => {
+        if (refreshState[field] !== undefined) {
+          data[field] = clonePersistedValue(refreshState[field]);
+        }
+      });
     }
     const moduleCount = Object.keys(data.modules || {}).length;
     const instCount = Object.values(data.modules || {}).reduce((sum, mod) => sum + (mod.instances?.length || 0), 0);
