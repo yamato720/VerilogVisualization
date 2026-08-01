@@ -647,7 +647,7 @@ def analyze_and_save(source_path: str, data_dir: str, save_name_override: str = 
             with open(save_path, 'r', encoding='utf-8') as saved_file:
                 previous_design = json.load(saved_file)
             for key in (
-                'layout', 'wire_waypoints', 'view_state', 'customizations',
+                'layout', 'wire_waypoints', 'timeline_dividers', 'view_state', 'customizations',
                 'tree_expanded', 'inline_expanded_paths', 'sidebar_ui',
                 'canvas_controls', 'server_sync_enabled', 'layout_revision',
             ):

@@ -31,7 +31,7 @@ description: 维护 `npc/VerilogVisualization` 的 RTL 发现、已保存设计 
 - `server_sync_enabled` 是每个设计的 JSON 字段；字段缺失时默认 `true`。开启实时同步先提交当前内存状态，再同步后续编辑；关闭实时同步必须取消已排队请求，并只提交该开关字段，不能连同过期坐标一起写回。
 - 手动保存应强制提交当前设计状态；打开设计本身和刷新后的重新打开不得自动写回状态。
 - 最近激活的设计名保存在浏览器 `localStorage` 的 `vviz_last_design`；启动拉取设计列表后，仅在设计仍存在时自动恢复，设计的重命名、删除和标签切换必须同步更新该指针；该指针不写入设计 JSON。
-- `/api/refresh` 和 `/api/reload` 重解析 `source_path` 后，必须保留 `layout`、`wire_waypoints`、`view_state`、`customizations`、`tree_expanded`、`sidebar_ui`、`canvas_controls` 与 `server_sync_enabled`。
+- `/api/refresh` 和 `/api/reload` 重解析 `source_path` 后，必须保留 `layout`、`wire_waypoints`、`timeline_dividers`、`view_state`、`customizations`、`tree_expanded`、`sidebar_ui`、`canvas_controls` 与 `server_sync_enabled`。
 - 不存在 JSON `view_state` 时，只在本次打开后自动适配画布一次；不得重新采用旧浏览器视图。
 
 ## 数据流布局
@@ -42,6 +42,7 @@ description: 维护 `npc/VerilogVisualization` 的 RTL 发现、已保存设计 
 4. 将寄存器堆、CSR 文件等状态源放在左侧；将写回反馈、转发和冒险控制置于主路径下方或边缘，避免挤占主数据通路。
 5. 为长时延或宽端口模块留出足够间距。不要仅把所有实例排成均匀网格，也不要按文件名或字母顺序布局。
 6. 对前端、内存 Fabric、乘除子模块等下钻视图重复相同原则。实例名是跨视图复用的布局键，只需避免同一父模块视图内的碰撞。
+7. `timeline_dividers` 是当前父模块局部坐标系中的纵向时序分割线；它们应穿过相应流水寄存器，并位于模块层下方，以便阶段边界不遮挡模块内容。
 
 ## 重布线与手工拐点
 

@@ -598,11 +598,13 @@ body {
   z-index: 1000; min-width: 160px;
 }
 .context-menu-item {
+  width: 100%; border: 0; background: transparent; color: #c9d1d9; text-align: left; font-family: inherit;
   padding: 6px 16px; font-size: 13px; cursor: pointer;
   display: flex; align-items: center; gap: 8px; transition: background 0.1s;
 }
 .context-menu-item:hover { background: #30363d; }
 .context-menu-separator { height: 1px; background: #30363d; margin: 4px 0; }
+#main-svg .timeline-divider { pointer-events: none; }
 
 /* ============ File Browser Modal ============ */
 .modal-overlay {

@@ -11,6 +11,7 @@ const STORAGE_WIRE_KEY_PREFIX = 'vviz_wires_';
 const STORAGE_VIEW_KEY_PREFIX = 'vviz_view_';
 const STORAGE_INLINE_EXPANDED_KEY_PREFIX = 'vviz_inline_expanded_';
 const STORAGE_CUSTOM_PREFIX = 'vviz_custom_';
+const STORAGE_TIMELINE_DIVIDERS_KEY_PREFIX = 'vviz_timeline_dividers_';
 const STORAGE_LOCAL_META_PREFIX = 'vviz_local_meta_';
 const STORAGE_LAST_DESIGN_KEY = 'vviz_last_design';
 const DEFAULT_SERVER_SYNC_ENABLED = true;
@@ -20,6 +21,7 @@ const LOCAL_PERSISTED_FIELDS = [
   'view_state',
   'customizations',
   'inline_expanded_paths',
+  'timeline_dividers',
 ];
 
 const LOCAL_STORAGE_FIELD_KEYS = {
@@ -28,6 +30,7 @@ const LOCAL_STORAGE_FIELD_KEYS = {
   view_state: STORAGE_VIEW_KEY_PREFIX,
   customizations: STORAGE_CUSTOM_PREFIX,
   inline_expanded_paths: STORAGE_INLINE_EXPANDED_KEY_PREFIX,
+  timeline_dividers: STORAGE_TIMELINE_DIVIDERS_KEY_PREFIX,
 };
 
 function saveLastDesign(designName) {
@@ -126,6 +129,44 @@ function loadInlineExpanded(designName) {
   }
 }
 
+function normalizeTimelineDividers(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  return value.reduce((result, divider) => {
+    const parentModule = typeof divider?.parent_module === 'string'
+      ? divider.parent_module.trim()
+      : '';
+    const x = Number(divider?.x);
+    if (!parentModule || !Number.isFinite(x)) return result;
+    const normalizedX = Math.round(x / 10) * 10;
+    const key = `${parentModule}:${normalizedX}`;
+    if (seen.has(key)) return result;
+    seen.add(key);
+    result.push({ parent_module: parentModule, x: normalizedX });
+    return result;
+  }, []).sort((left, right) => (
+    left.parent_module.localeCompare(right.parent_module) || left.x - right.x
+  ));
+}
+
+function saveTimelineDividers(designName, dividers, { sync = true, dirty = sync } = {}) {
+  const normalized = normalizeTimelineDividers(dividers);
+  try {
+    localStorage.setItem(STORAGE_TIMELINE_DIVIDERS_KEY_PREFIX + designName, JSON.stringify(normalized));
+  } catch (e) {}
+  if (dirty) markLocalStateDirty(designName, 'timeline_dividers');
+  if (sync) scheduleSyncToServer(designName);
+}
+
+function loadTimelineDividers(designName) {
+  try {
+    const data = localStorage.getItem(STORAGE_TIMELINE_DIVIDERS_KEY_PREFIX + designName);
+    return normalizeTimelineDividers(data ? JSON.parse(data) : []);
+  } catch (e) {
+    return [];
+  }
+}
+
 const STORAGE_HIDE_CLK_RST = 'vviz_hide_clk_rst';
 
 function saveHideClockReset(val) {
@@ -178,6 +219,7 @@ function normalizePersistedField(field, value) {
       ? [...new Set(value.filter(path => typeof path === 'string'))].sort()
       : [];
   }
+  if (field === 'timeline_dividers') return normalizeTimelineDividers(value);
   return null;
 }
 
@@ -439,6 +481,7 @@ function syncStateToServer(designName, { force = false } = {}) {
     customizations: normalizeCustomizations(state.customizations?.[designName] || {}),
     tree_expanded: state.treeExpanded?.[designName] ? [...state.treeExpanded[designName]] : [],
     inline_expanded_paths: state.inlineExpanded?.[designName] ? [...state.inlineExpanded[designName]] : [],
+    timeline_dividers: state.timelineDividers?.[designName] || [],
     sidebar_ui: (() => {
       const sb = $('sidebar');
       if (!sb) return undefined;
@@ -563,6 +606,7 @@ const state = {
   layoutOverrides: {},  // designName -> { instName: {...} }
   // Wire waypoints per design: { wireKey: [{x, y}, ...] }
   wireWaypoints: {},    // designName -> { wireKey: [{x,y},...] }
+  timelineDividers: {}, // 每个父模块局部坐标系的纵向时序分割线
   // Pan & zoom
   pan: { x: 0, y: 0 },
   zoom: 1,
@@ -656,6 +700,14 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+
+  document.addEventListener('pointerdown', e => {
+    const menu = $('context-menu');
+    if (menu && !menu.contains(e.target)) hideTimelineDividerMenu();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') hideTimelineDividerMenu();
+  });
 
   // Pre-init resize handle so it's ready before first popup open
   const popup = $('comment-popup');
@@ -761,11 +813,13 @@ function toggleClockReset() {
 function resetLayout() {
   const name = state.activeTab;
   if (!name) { showToast('没有打开的设计', 'warn'); return; }
-  if (!confirm('确定重置布局？将清除所有模块位置和线路编辑。')) return;
+  if (!confirm('确定重置布局？将清除所有模块位置、线路编辑和时序分割线。')) return;
   state.layoutOverrides[name] = {};
   state.wireWaypoints[name] = {};
+  state.timelineDividers[name] = [];
   saveLayout(name, {});
   saveWireWaypoints(name, {});
+  saveTimelineDividers(name, []);
   state.pan = { x: 0, y: 0 };
   state.zoom = 1;
   renderCanvas();
@@ -928,6 +982,7 @@ function captureRefreshState(designName) {
   return {
     layout: clonePersistedValue(state.layoutOverrides?.[designName] || {}),
     wire_waypoints: clonePersistedValue(state.wireWaypoints?.[designName] || {}),
+    timeline_dividers: clonePersistedValue(state.timelineDividers?.[designName] || []),
     view_state: clonePersistedValue(viewState),
     customizations: clonePersistedValue(
       normalizeCustomizations(state.customizations?.[designName] || {})
@@ -1302,6 +1357,7 @@ async function openDesign(name, { refreshState = null } = {}) {
         ...data,
         layout: localResolution.state.layout,
         wire_waypoints: localResolution.state.wire_waypoints,
+        timeline_dividers: localResolution.state.timeline_dividers,
         view_state: localResolution.state.view_state,
         customizations: localResolution.state.customizations,
         inline_expanded_paths: localResolution.state.inline_expanded_paths,
@@ -1310,7 +1366,7 @@ async function openDesign(name, { refreshState = null } = {}) {
     if (refreshState) {
       // 刷新设计不等同于重新打开：模块定义可以来自新 RTL，但 UI 状态来自刷新前的画布。
       [
-        'layout', 'wire_waypoints', 'view_state', 'customizations',
+        'layout', 'wire_waypoints', 'timeline_dividers', 'view_state', 'customizations',
         'inline_expanded_paths', 'tree_expanded', 'sidebar_ui',
         'canvas_controls', 'server_sync_enabled',
       ].forEach(field => {
@@ -1334,6 +1390,17 @@ async function openDesign(name, { refreshState = null } = {}) {
       Array.isArray(data.inline_expanded_paths) ? data.inline_expanded_paths : []
     );
     saveInlineExpanded(name, state.inlineExpanded[name], { sync: false, dirty: false });
+
+    const serverTimelineDividers = normalizeTimelineDividers(data.timeline_dividers);
+    const localTimelineDividers = loadTimelineDividers(name);
+    if (serverTimelineDividers.length > 0) {
+      state.timelineDividers[name] = serverTimelineDividers;
+      saveTimelineDividers(name, serverTimelineDividers, { sync: false, dirty: false });
+    } else if (localTimelineDividers.length > 0) {
+      state.timelineDividers[name] = localTimelineDividers;
+    } else {
+      state.timelineDividers[name] = [];
+    }
 
     // Select first top module to expand (canvas view)
     if (data.top_modules && data.top_modules.length > 0) {
@@ -1454,6 +1521,7 @@ async function openDesign(name, { refreshState = null } = {}) {
     recordLocalServerSnapshot(name, {
       layout: state.layoutOverrides[name],
       wire_waypoints: state.wireWaypoints[name],
+      timeline_dividers: state.timelineDividers[name],
       view_state: savedView,
       customizations: state.customizations[name],
       inline_expanded_paths: [...state.inlineExpanded[name]],
@@ -1555,6 +1623,7 @@ async function renameDesign(oldName) {
       [STORAGE_WIRE_KEY_PREFIX,   loadWireWaypoints,    saveWireWaypoints   ],
       [STORAGE_VIEW_KEY_PREFIX,   loadViewState,        saveViewState       ],
       [STORAGE_CUSTOM_PREFIX,     loadCustomizations,   saveCustomizations  ],
+      [STORAGE_TIMELINE_DIVIDERS_KEY_PREFIX, loadTimelineDividers, saveTimelineDividers],
     ];
     state.serverSyncEnabled[trimmed] = isServerSyncEnabled(oldName);
     delete state.serverSyncEnabled[oldName];
@@ -1577,6 +1646,7 @@ async function renameDesign(oldName) {
     }
     // Remove old keys explicitly
     [STORAGE_KEY_PREFIX, STORAGE_WIRE_KEY_PREFIX, STORAGE_VIEW_KEY_PREFIX, STORAGE_CUSTOM_PREFIX,
+      STORAGE_TIMELINE_DIVIDERS_KEY_PREFIX,
       STORAGE_INLINE_EXPANDED_KEY_PREFIX, STORAGE_LOCAL_META_PREFIX].forEach(pfx => {
       try { localStorage.removeItem(pfx + oldName); } catch(e) {}
     });
@@ -1592,6 +1662,10 @@ async function renameDesign(oldName) {
     if (state.wireWaypoints[oldName]) {
       state.wireWaypoints[trimmed] = state.wireWaypoints[oldName];
       delete state.wireWaypoints[oldName];
+    }
+    if (state.timelineDividers[oldName]) {
+      state.timelineDividers[trimmed] = state.timelineDividers[oldName];
+      delete state.timelineDividers[oldName];
     }
     if (state.customizations[oldName]) {
       state.customizations[trimmed] = state.customizations[oldName];
@@ -2379,6 +2453,7 @@ function renderCanvas() {
   const layoutOvr = state.layoutOverrides[tab.name] || {};
   const wireWps = state.wireWaypoints[tab.name] || {};
   const inlineExpandedPaths = state.inlineExpanded[tab.name] || new Set();
+  const timelineDividers = state.timelineDividers[tab.name] || [];
   state.customizations[tab.name] = normalizeCustomizations(state.customizations[tab.name] || {});
 
   // Clear & render
@@ -2388,6 +2463,7 @@ function renderCanvas() {
     selectedWireKey: state.selectedWireKey,
     customizations: state.customizations[tab.name] || { modules: {}, wires: {} },
     inlineExpandedPaths,
+    timelineDividers,
   });
   svgRoot.appendChild(rootG);
   renderCommentBlocks(rootG, tab.name);
@@ -2797,6 +2873,43 @@ function svgToDesignCoords(clientX, clientY) {
     x: (svgX - state.pan.x) / state.zoom,
     y: (svgY - state.pan.y) / state.zoom,
   };
+}
+
+function hideTimelineDividerMenu() {
+  const menu = $('context-menu');
+  if (!menu) return;
+  menu.style.display = 'none';
+  menu.replaceChildren();
+}
+
+function showTimelineDividerMenu(event, designName, parentModule, designPoint, scopeOriginX) {
+  const menu = $('context-menu');
+  if (!menu) return;
+  const x = Math.round((designPoint.x - scopeOriginX) / 10) * 10;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'context-menu-item';
+  button.textContent = '新建纵向时序分割线';
+  button.addEventListener('click', () => {
+    const dividers = state.timelineDividers[designName] || [];
+    const exists = dividers.some(divider => (
+      divider.parent_module === parentModule && divider.x === x
+    ));
+    if (!exists) {
+      state.timelineDividers[designName] = normalizeTimelineDividers([
+        ...dividers,
+        { parent_module: parentModule, x },
+      ]);
+      saveTimelineDividers(designName, state.timelineDividers[designName]);
+      renderCanvas();
+      showToast('已添加时序分割线', 'success');
+    }
+    hideTimelineDividerMenu();
+  });
+  menu.replaceChildren(button);
+  menu.style.display = 'block';
+  menu.style.left = `${Math.min(event.clientX, window.innerWidth - menu.offsetWidth - 8)}px`;
+  menu.style.top = `${Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 8)}px`;
 }
 
 // ─── Persistent Comment Blocks ─────────────────────────────────────────
@@ -3719,6 +3832,25 @@ function closeInfoPanel() {
 function initPanZoom() {
   const container = $('canvas-container');
   const svg = getSVG();
+
+  svg.addEventListener('contextmenu', e => {
+    if (e.target.closest?.('.module-box, .wire-group, .wire-waypoint, .comment-block')) return;
+    const tab = state.openTabs.find(item => item.name === state.activeTab);
+    if (!tab || !state.designs[tab.name]) return;
+    const scope = getSVGRoot().querySelector('#design-root > .module-internal');
+    const point = svgToDesignCoords(e.clientX, e.clientY);
+    const parentModule = tab.module || state.designs[tab.name].top_modules?.[0];
+    if (!scope || !point || !parentModule) return;
+    e.preventDefault();
+    clearActiveCommentBlock();
+    showTimelineDividerMenu(
+      e,
+      tab.name,
+      parentModule,
+      point,
+      Number(scope.getAttribute('data-scope-origin-x')) || 0,
+    );
+  });
 
   container.addEventListener('mousedown', e => {
     if (e.button !== 0) return;

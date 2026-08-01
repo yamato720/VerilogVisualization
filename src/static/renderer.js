@@ -1120,6 +1120,7 @@ function renderModuleTree(item, x, y, allModules, collapsedState, layoutOverride
         depth: (options.depth || 0) + 1,
         boundaryPorts,
         precomputedLayout: geometry.childLayout,
+        timelineDividers: [],
       },
     );
     const header = render.group.children?.[1] || null;
@@ -1127,6 +1128,28 @@ function renderModuleTree(item, x, y, allModules, collapsedState, layoutOverride
   }
 
   return render;
+}
+
+function renderTimelineDividers(layer, parentModuleName, layout, offsetX, offsetY, dividers) {
+  const visible = (dividers || []).filter(divider => divider.parent_module === parentModuleName);
+  if (visible.length === 0 || layout.length === 0) return;
+  const top = offsetY + Math.min(...layout.map(item => item.y)) - LAYOUT.MOD_PAD_Y;
+  const bottom = offsetY + Math.max(...layout.map(item => item.y + item.size.height)) + LAYOUT.MOD_PAD_Y;
+  visible.forEach(divider => {
+    const x = offsetX + divider.x;
+    layer.appendChild(svgEl('line', {
+      class: 'timeline-divider',
+      x1: x,
+      x2: x,
+      y1: top,
+      y2: bottom,
+      stroke: '#58a6ff',
+      'stroke-width': 2,
+      'stroke-dasharray': '10,8',
+      opacity: 0.5,
+      'pointer-events': 'none',
+    }));
+  });
 }
 
 function expressionKeys(expression) {
@@ -1151,8 +1174,10 @@ function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsed
   const hideClockReset = options.hideClockReset || false;
   const customizations = options.customizations || { modules: {}, wires: {} };
   const wireLayer = svgEl('g', { class: 'wire-layer' });
+  const timelineLayer = svgEl('g', { class: 'timeline-divider-layer' });
   const moduleLayer = svgEl('g', { class: 'module-layer' });
   g.appendChild(wireLayer);
+  g.appendChild(timelineLayer);
   g.appendChild(moduleLayer);
 
   const instOverrides = layoutOverrides || {};
@@ -1172,6 +1197,15 @@ function renderModuleInternal(parentMod, allModules, offsetX, offsetY, collapsed
     },
   );
   const renders = {};
+
+  renderTimelineDividers(
+    timelineLayer,
+    parentMod.name,
+    layout,
+    offsetX,
+    offsetY,
+    options.timelineDividers,
+  );
 
   layout.forEach(item => {
     const ix = offsetX + item.x;
