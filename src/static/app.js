@@ -10,7 +10,22 @@ const STORAGE_COLLAPSED_KEY = 'vviz_collapsed';
 const STORAGE_WIRE_KEY_PREFIX = 'vviz_wires_';
 const STORAGE_VIEW_KEY_PREFIX = 'vviz_view_';
 const STORAGE_INLINE_EXPANDED_KEY_PREFIX = 'vviz_inline_expanded_';
+const STORAGE_LAST_DESIGN_KEY = 'vviz_last_design';
 const DEFAULT_SERVER_SYNC_ENABLED = true;
+
+function saveLastDesign(designName) {
+  if (!designName) return;
+  try { localStorage.setItem(STORAGE_LAST_DESIGN_KEY, designName); } catch (e) {}
+}
+
+function loadLastDesign() {
+  try { return localStorage.getItem(STORAGE_LAST_DESIGN_KEY) || ''; }
+  catch (e) { return ''; }
+}
+
+function clearLastDesign() {
+  try { localStorage.removeItem(STORAGE_LAST_DESIGN_KEY); } catch (e) {}
+}
 
 function saveLayout(designName, layoutData, { sync = true } = {}) {
   try { localStorage.setItem(STORAGE_KEY_PREFIX + designName, JSON.stringify(layoutData)); }
@@ -335,7 +350,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initTreeKeyboardNav();
   initSidebarResize();
   updateServerSyncControls();
-  loadDesignList();
+  loadDesignList({ restoreLast: true });
 
   // Update clock/reset toggle button text on load
   const clkBtn = $('btn-toggle-clk-rst');
@@ -834,7 +849,7 @@ async function doAnalyze() {
   }
 }
 
-async function loadDesignList() {
+async function loadDesignList({ restoreLast = false } = {}) {
   try {
     const res = await fetch('/api/designs');
     const designs = await res.json();  // array of { name, top_modules, module_count, source_path }
@@ -867,6 +882,16 @@ async function loadDesignList() {
       });
       listDiv.appendChild(item);
     });
+
+    // 启动时恢复最近打开的设计；设计已被删除时清理过期指针。
+    if (restoreLast && !state.activeTab) {
+      const lastDesign = loadLastDesign();
+      if (lastDesign && designs.some(design => design.name === lastDesign)) {
+        await openDesign(lastDesign);
+      } else if (lastDesign && designs.length > 0) {
+        clearLastDesign();
+      }
+    }
   } catch (err) {
     console.error('Failed to load designs', err);
   }
@@ -1061,6 +1086,7 @@ async function openDesign(name) {
       state.openTabs.push({ name, module: data.top_modules?.[0] || Object.keys(data.modules)[0] });
     }
     state.activeTab = name;
+    saveLastDesign(name);
     updateServerSyncControls();
 
     // Show sections
@@ -1183,6 +1209,7 @@ async function renameDesign(oldName) {
     state.openTabs = state.openTabs.map(t => t.name === oldName ? { ...t, name: trimmed } : t);
     if (state.activeTab === oldName) state.activeTab = trimmed;
     if (state.activeDesign === oldName) state.activeDesign = trimmed;
+    if (loadLastDesign() === oldName) saveLastDesign(trimmed);
     if (state.expandedModules[oldName]) {
       state.expandedModules[trimmed] = state.expandedModules[oldName];
       delete state.expandedModules[oldName];
@@ -1223,6 +1250,8 @@ async function deleteDesign(name) {
     if (state.activeTab === name) {
       state.activeTab = state.openTabs[0]?.name || null;
       state.activeDesign = state.activeTab;
+      if (state.activeTab) saveLastDesign(state.activeTab);
+      else clearLastDesign();
     }
     renderTabs();
     loadDesignList();
@@ -1252,6 +1281,7 @@ function renderTabs() {
     div.querySelector('span:first-child').addEventListener('click', () => {
       state.activeTab = tab.name;
       state.activeDesign = tab.name;
+      saveLastDesign(tab.name);
       renderTabs();
       renderSidebar(tab.name);
       renderCanvas();
@@ -1262,6 +1292,8 @@ function renderTabs() {
       if (state.activeTab === tab.name) {
         state.activeTab = state.openTabs[0]?.name || null;
         state.activeDesign = state.activeTab;
+        if (state.activeTab) saveLastDesign(state.activeTab);
+        else clearLastDesign();
       }
       renderTabs();
       renderCanvas();
