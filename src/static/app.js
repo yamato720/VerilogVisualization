@@ -10,8 +10,25 @@ const STORAGE_COLLAPSED_KEY = 'vviz_collapsed';
 const STORAGE_WIRE_KEY_PREFIX = 'vviz_wires_';
 const STORAGE_VIEW_KEY_PREFIX = 'vviz_view_';
 const STORAGE_INLINE_EXPANDED_KEY_PREFIX = 'vviz_inline_expanded_';
+const STORAGE_CUSTOM_PREFIX = 'vviz_custom_';
+const STORAGE_LOCAL_META_PREFIX = 'vviz_local_meta_';
 const STORAGE_LAST_DESIGN_KEY = 'vviz_last_design';
 const DEFAULT_SERVER_SYNC_ENABLED = true;
+const LOCAL_PERSISTED_FIELDS = [
+  'layout',
+  'wire_waypoints',
+  'view_state',
+  'customizations',
+  'inline_expanded_paths',
+];
+
+const LOCAL_STORAGE_FIELD_KEYS = {
+  layout: STORAGE_KEY_PREFIX,
+  wire_waypoints: STORAGE_WIRE_KEY_PREFIX,
+  view_state: STORAGE_VIEW_KEY_PREFIX,
+  customizations: STORAGE_CUSTOM_PREFIX,
+  inline_expanded_paths: STORAGE_INLINE_EXPANDED_KEY_PREFIX,
+};
 
 function saveLastDesign(designName) {
   if (!designName) return;
@@ -36,18 +53,20 @@ function getLayoutOverrideForInstance(designName, layoutKey, instanceName = '') 
   };
 }
 
-function saveLayout(designName, layoutData, { sync = true } = {}) {
+function saveLayout(designName, layoutData, { sync = true, dirty = sync } = {}) {
   try { localStorage.setItem(STORAGE_KEY_PREFIX + designName, JSON.stringify(layoutData)); }
   catch (e) { console.warn('Failed to save layout', e); }
+  if (dirty) markLocalStateDirty(designName, 'layout');
   if (sync) scheduleSyncToServer(designName);
 }
 function loadLayout(designName) {
   try { const d = localStorage.getItem(STORAGE_KEY_PREFIX + designName); return d ? JSON.parse(d) : {}; }
   catch (e) { return {}; }
 }
-function saveWireWaypoints(designName, data, { sync = true } = {}) {
+function saveWireWaypoints(designName, data, { sync = true, dirty = sync } = {}) {
   try { localStorage.setItem(STORAGE_WIRE_KEY_PREFIX + designName, JSON.stringify(data)); }
   catch (e) {}
+  if (dirty) markLocalStateDirty(designName, 'wire_waypoints');
   if (sync) scheduleSyncToServer(designName);
 }
 function loadWireWaypoints(designName) {
@@ -62,22 +81,24 @@ function loadCollapsedState() {
   try { const d = localStorage.getItem(STORAGE_COLLAPSED_KEY); return d ? JSON.parse(d) : {}; }
   catch (e) { return {}; }
 }
-function saveViewState(designName, view, { sync = true } = {}) {
+function saveViewState(designName, view, { sync = true, dirty = sync } = {}) {
   try { localStorage.setItem(STORAGE_VIEW_KEY_PREFIX + designName, JSON.stringify(view)); }
   catch (e) {}
+  if (dirty) markLocalStateDirty(designName, 'view_state');
   if (sync) scheduleSyncToServer(designName);
 }
 function loadViewState(designName) {
   try { const d = localStorage.getItem(STORAGE_VIEW_KEY_PREFIX + designName); return d ? JSON.parse(d) : null; }
   catch (e) { return null; }
 }
-function saveInlineExpanded(designName, paths, { sync = true } = {}) {
+function saveInlineExpanded(designName, paths, { sync = true, dirty = sync } = {}) {
   try {
     localStorage.setItem(
       STORAGE_INLINE_EXPANDED_KEY_PREFIX + designName,
       JSON.stringify([...paths])
     );
   } catch (e) {}
+  if (dirty) markLocalStateDirty(designName, 'inline_expanded_paths');
   if (sync) scheduleSyncToServer(designName);
 }
 function loadInlineExpanded(designName) {
@@ -90,7 +111,6 @@ function loadInlineExpanded(designName) {
 }
 
 const STORAGE_HIDE_CLK_RST = 'vviz_hide_clk_rst';
-const STORAGE_CUSTOM_PREFIX = 'vviz_custom_';
 
 function saveHideClockReset(val) {
   try { localStorage.setItem(STORAGE_HIDE_CLK_RST, JSON.stringify(val)); } catch(e) {}
@@ -101,8 +121,9 @@ function loadHideClockReset() {
 }
 
 // Customization: { modules: { instName: { color, rename, comment } }, wires: { wireKey: { color } }, commentBlocks: { id: { x, y, width, height, markdown } } }
-function saveCustomizations(designName, data) {
+function saveCustomizations(designName, data, { dirty = true } = {}) {
   try { localStorage.setItem(STORAGE_CUSTOM_PREFIX + designName, JSON.stringify(data)); } catch(e) {}
+  if (dirty) markLocalStateDirty(designName, 'customizations');
 }
 function loadCustomizations(designName) {
   try { const d = localStorage.getItem(STORAGE_CUSTOM_PREFIX + designName); return normalizeCustomizations(d ? JSON.parse(d) : {}); }
@@ -114,6 +135,199 @@ function normalizeCustomizations(data) {
     wires: data?.wires || {},
     commentBlocks: data?.commentBlocks || {},
   };
+}
+
+function normalizePersistedField(field, value) {
+  if (field === 'layout' || field === 'wire_waypoints') {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  }
+  if (field === 'view_state') {
+    if (!value || typeof value !== 'object' || !value.pan) return null;
+    const x = Number(value.pan.x);
+    const y = Number(value.pan.y);
+    const zoom = Number(value.zoom);
+    if (![x, y, zoom].every(Number.isFinite)) return null;
+    return { pan: { x, y }, zoom };
+  }
+  if (field === 'customizations') return normalizeCustomizations(value || {});
+  if (field === 'inline_expanded_paths') {
+    return Array.isArray(value)
+      ? [...new Set(value.filter(path => typeof path === 'string'))].sort()
+      : [];
+  }
+  return null;
+}
+
+function normalizePersistedSnapshot(source = {}) {
+  const snapshot = {};
+  LOCAL_PERSISTED_FIELDS.forEach(field => {
+    snapshot[field] = normalizePersistedField(field, source[field]);
+  });
+  return snapshot;
+}
+
+function stableStateValue(value) {
+  if (Array.isArray(value)) return value.map(stableStateValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.keys(value).sort().reduce((result, key) => {
+    result[key] = stableStateValue(value[key]);
+    return result;
+  }, {});
+}
+
+function persistedStateSignature(value) {
+  const text = JSON.stringify(stableStateValue(value));
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${text.length}:${(hash >>> 0).toString(16)}`;
+}
+
+function persistedStateEqual(left, right) {
+  return persistedStateSignature(left) === persistedStateSignature(right);
+}
+
+function readLocalJson(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return { present: false, value: null };
+    return { present: true, value: JSON.parse(raw) };
+  } catch (e) {
+    return { present: true, value: null };
+  }
+}
+
+function loadLocalPersistedState(designName) {
+  const result = {};
+  LOCAL_PERSISTED_FIELDS.forEach(field => {
+    const stored = readLocalJson(LOCAL_STORAGE_FIELD_KEYS[field] + designName);
+    result[field] = {
+      present: stored.present,
+      value: stored.present ? normalizePersistedField(field, stored.value) : null,
+    };
+  });
+  return result;
+}
+
+function loadLocalSyncMeta(designName) {
+  const stored = readLocalJson(STORAGE_LOCAL_META_PREFIX + designName);
+  const value = stored.value && typeof stored.value === 'object' ? stored.value : {};
+  const dirtyFields = Array.isArray(value.dirty_fields)
+    ? value.dirty_fields.filter(field => LOCAL_PERSISTED_FIELDS.includes(field))
+    : [];
+  const signatures = value.server_signatures && typeof value.server_signatures === 'object'
+    ? value.server_signatures
+    : {};
+  return {
+    dirty: value.dirty === true,
+    dirtyFields: [...new Set(dirtyFields)],
+    revision: Number.isFinite(Number(value.revision)) ? Number(value.revision) : 0,
+    updatedAt: Number.isFinite(Number(value.updated_at)) ? Number(value.updated_at) : 0,
+    serverSignatures: { ...signatures },
+  };
+}
+
+function saveLocalSyncMeta(designName, meta) {
+  try {
+    localStorage.setItem(STORAGE_LOCAL_META_PREFIX + designName, JSON.stringify({
+      version: 1,
+      dirty: meta.dirty === true,
+      dirty_fields: [...new Set(meta.dirtyFields || [])],
+      revision: meta.revision || 0,
+      updated_at: meta.updatedAt || Date.now(),
+      server_signatures: meta.serverSignatures || {},
+    }));
+  } catch (e) {}
+}
+
+function snapshotSignatures(snapshot) {
+  const normalized = normalizePersistedSnapshot(snapshot);
+  return LOCAL_PERSISTED_FIELDS.reduce((result, field) => {
+    result[field] = persistedStateSignature(normalized[field]);
+    return result;
+  }, {});
+}
+
+function markLocalStateDirty(designName, field) {
+  if (!designName || !LOCAL_PERSISTED_FIELDS.includes(field)) return;
+  const meta = loadLocalSyncMeta(designName);
+  meta.dirty = true;
+  if (!meta.dirtyFields.includes(field)) meta.dirtyFields.push(field);
+  meta.revision += 1;
+  meta.updatedAt = Date.now();
+  saveLocalSyncMeta(designName, meta);
+}
+
+function hasPendingLocalChanges(designName) {
+  return Boolean(designName && loadLocalSyncMeta(designName).dirty);
+}
+
+function recordLocalServerSnapshot(designName, snapshot, { preserveDirty = true } = {}) {
+  const meta = loadLocalSyncMeta(designName);
+  const nextSignatures = snapshotSignatures(snapshot);
+  if (preserveDirty && meta.dirtyFields.length > 0) {
+    meta.serverSignatures = {
+      ...nextSignatures,
+      ...Object.fromEntries(meta.dirtyFields.map(field => [
+        field,
+        meta.serverSignatures[field] || nextSignatures[field],
+      ])),
+    };
+  } else {
+    meta.serverSignatures = nextSignatures;
+    meta.dirty = false;
+    meta.dirtyFields = [];
+  }
+  meta.updatedAt = Date.now();
+  saveLocalSyncMeta(designName, meta);
+}
+
+function markLocalStateSynced(designName, revision, snapshot) {
+  const meta = loadLocalSyncMeta(designName);
+  if (revision !== undefined && meta.revision !== revision) return;
+  recordLocalServerSnapshot(designName, snapshot, { preserveDirty: false });
+}
+
+function resolveLocalPersistedState(designName, serverData) {
+  const serverState = normalizePersistedSnapshot(serverData);
+  const localState = loadLocalPersistedState(designName);
+  const meta = loadLocalSyncMeta(designName);
+  const resolved = { ...serverState };
+  const usedLocalFields = [];
+  const allFieldsExplicitlyDirty = meta.dirty && meta.dirtyFields.length === 0;
+
+  LOCAL_PERSISTED_FIELDS.forEach(field => {
+    const local = localState[field];
+    if (!local.present) return;
+    const baselineSignature = meta.serverSignatures[field];
+    const changedSinceBaseline = baselineSignature
+      ? persistedStateSignature(local.value) !== baselineSignature
+      : !persistedStateEqual(local.value, serverState[field]);
+    const preferLocal = allFieldsExplicitlyDirty
+      || meta.dirtyFields.includes(field)
+      || changedSinceBaseline;
+    if (preferLocal) {
+      resolved[field] = local.value;
+      usedLocalFields.push(field);
+    }
+  });
+
+  if (usedLocalFields.length > 0) {
+    meta.dirty = true;
+    meta.dirtyFields = [...new Set([...meta.dirtyFields, ...usedLocalFields])];
+    if (Object.keys(meta.serverSignatures).length === 0) {
+      meta.serverSignatures = snapshotSignatures(serverState);
+    }
+    if (meta.revision === 0) meta.revision = 1;
+    meta.updatedAt = Date.now();
+    saveLocalSyncMeta(designName, meta);
+  } else if (!meta.dirty) {
+    recordLocalServerSnapshot(designName, serverState, { preserveDirty: false });
+  }
+
+  return { state: resolved, usedLocalFields };
 }
 
 const STORAGE_CANVAS_BG = 'vviz_canvas_bg';
@@ -173,6 +387,7 @@ function scheduleSyncToServer(designName) {
 
 function syncStateToServer(designName, { force = false } = {}) {
   if (!designName || (!force && !isServerSyncEnabled(designName))) return Promise.resolve(null);
+  const sentRevision = loadLocalSyncMeta(designName).revision;
   const viewState = (state.activeTab === designName && state.pan)
     ? { pan: { ...state.pan }, zoom: state.zoom }
     : (loadViewState(designName) || undefined);
@@ -215,7 +430,11 @@ function syncStateToServer(designName, { force = false } = {}) {
     signal: controller.signal,
   }).then(async response => {
     if (!response.ok) throw new Error(`保存失败 (${response.status})`);
-    return response.json();
+    const result = await response.json();
+    // 只有请求期间没有新的本地编辑时，才能清除待同步标记。
+    markLocalStateSynced(designName, sentRevision, payload);
+    updateServerSyncControls();
+    return result;
   }).finally(() => {
     if (_syncControllers[designName] === controller) delete _syncControllers[designName];
   });
@@ -229,9 +448,11 @@ function updateServerSyncControls() {
   if (toggle) {
     toggle.checked = enabled;
     toggle.disabled = !designName;
-    toggle.parentElement.title = designName
-      ? '开启时保存当前状态，并将后续编辑写入设计 JSON'
-      : '打开设计后可设置实时同步';
+    toggle.parentElement.title = !designName
+      ? '打开设计后可设置实时同步'
+      : hasPendingLocalChanges(designName)
+        ? '检测到本地未同步修改；开启同步会以当前本地状态写入设计 JSON'
+        : '开启时保存当前状态，并将后续编辑写入设计 JSON';
   }
   if (saveButton) saveButton.disabled = !designName;
 }
@@ -985,8 +1206,20 @@ async function openDesign(name) {
     const res = await fetch(`/api/design/${name}`);
     updateLoadProgress(18, '正在解析设计数据...');
     await nextFrame();
-    const data = await res.json();
+    let data = await res.json();
     if (data.error) { hideLoadProgress(); showToast('加载失败: ' + data.error, 'error'); return; }
+    const localResolution = resolveLocalPersistedState(name, data);
+    if (localResolution.usedLocalFields.length > 0) {
+      // 本地缓存有未同步编辑时，只覆盖对应字段，避免远端旧状态吞掉本地调整。
+      data = {
+        ...data,
+        layout: localResolution.state.layout,
+        wire_waypoints: localResolution.state.wire_waypoints,
+        view_state: localResolution.state.view_state,
+        customizations: localResolution.state.customizations,
+        inline_expanded_paths: localResolution.state.inline_expanded_paths,
+      };
+    }
     const moduleCount = Object.keys(data.modules || {}).length;
     const instCount = Object.values(data.modules || {}).reduce((sum, mod) => sum + (mod.instances?.length || 0), 0);
     updateLoadProgress(26, `读取完成：${moduleCount} 个模块，${instCount} 个实例`);
@@ -1001,7 +1234,7 @@ async function openDesign(name) {
     state.inlineExpanded[name] = new Set(
       Array.isArray(data.inline_expanded_paths) ? data.inline_expanded_paths : []
     );
-    saveInlineExpanded(name, state.inlineExpanded[name], { sync: false });
+    saveInlineExpanded(name, state.inlineExpanded[name], { sync: false, dirty: false });
 
     // Select first top module to expand (canvas view)
     if (data.top_modules && data.top_modules.length > 0) {
@@ -1023,7 +1256,7 @@ async function openDesign(name) {
       }
     }
 
-    // 服务器 JSON 是既有设计的唯一布局来源；localStorage 仅兼容早期无布局文件。
+    // 服务端是默认来源；本地有待同步字段时，resolveLocalPersistedState 已提前保留本地值。
     updateLoadProgress(48, '恢复布局、连线和注释块...');
     const serverLayout = data.layout || {};
     const localLayout = loadLayout(name);
@@ -1056,7 +1289,7 @@ async function openDesign(name) {
     } else {
       state.wireWaypoints[name] = {};
     }
-    // 服务器 JSON 优先；localStorage 只用于没有保存状态的旧设计。
+    // customizations 与布局使用同一套本地优先规则，避免旧缓存覆盖当前设计。
     const serverCustom = normalizeCustomizations(data.customizations || {});
     const localCustom = loadCustomizations(name);
     const hasServer = Object.keys(serverCustom.modules || {}).length > 0
@@ -1067,7 +1300,7 @@ async function openDesign(name) {
       || Object.keys(localCustom.commentBlocks || {}).length > 0;
     if (hasServer) {
       state.customizations[name] = serverCustom;
-      saveCustomizations(name, state.customizations[name]);
+      saveCustomizations(name, state.customizations[name], { dirty: false });
     } else if (hasLocal) {
       state.customizations[name] = localCustom;
     } else {
@@ -1095,7 +1328,7 @@ async function openDesign(name) {
       if (added) saveLayout(name, state.layoutOverrides[name], { sync: false });
     }
 
-    // 只使用 JSON 中的视图状态，避免旧浏览器缓存影响重新打开的设计。
+    // 没有本地待同步视图时才使用 JSON 中的视图状态。
     const savedView = data.view_state || null;
     state.autoFitPending[name] = !savedView;
     if (savedView) {
@@ -1106,6 +1339,15 @@ async function openDesign(name) {
       state.pan = { x: 0, y: 0 };
       state.zoom = 1;
     }
+
+    // 记录本次打开看到的服务端快照；本地待同步字段保留原基线，后续仍优先本地。
+    recordLocalServerSnapshot(name, {
+      layout: state.layoutOverrides[name],
+      wire_waypoints: state.wireWaypoints[name],
+      view_state: data.view_state || null,
+      customizations: state.customizations[name],
+      inline_expanded_paths: [...state.inlineExpanded[name]],
+    });
 
     // Add tab
     if (!state.openTabs.find(t => t.name === name)) {
@@ -1168,7 +1410,12 @@ async function openDesign(name) {
 
     updateLoadProgress(100, '加载完成');
     setTimeout(hideLoadProgress, 250);
-    showToast(`已加载: ${name}`, 'success');
+    showToast(
+      localResolution.usedLocalFields.length > 0
+        ? `已加载: ${name}（已优先恢复本地未同步修改）`
+        : `已加载: ${name}`,
+      localResolution.usedLocalFields.length > 0 ? 'info' : 'success'
+    );
   } catch (err) {
     hideLoadProgress();
     showToast('加载失败: ' + err.message, 'error');
@@ -1200,15 +1447,24 @@ async function renameDesign(oldName) {
     delete state.serverSyncEnabled[oldName];
     lsKeys.forEach(([, loader, saver]) => {
       const val = loader(oldName);
-      if (val && Object.keys(val).length > 0) saver(trimmed, val, { sync: false });
+      if (val && Object.keys(val).length > 0) {
+        saver(trimmed, val, { sync: false, dirty: false });
+      }
       try { localStorage.removeItem(STORAGE_KEY_PREFIX.replace(/layout/, lsKeys[0][0]) + oldName); } catch(e) {}
     });
     const inlinePaths = loadInlineExpanded(oldName);
     if (inlinePaths.size > 0) {
-      saveInlineExpanded(trimmed, inlinePaths, { sync: false });
+      saveInlineExpanded(trimmed, inlinePaths, { sync: false, dirty: false });
+    }
+    const localMeta = readLocalJson(STORAGE_LOCAL_META_PREFIX + oldName);
+    if (localMeta.present) {
+      try {
+        localStorage.setItem(STORAGE_LOCAL_META_PREFIX + trimmed, JSON.stringify(localMeta.value));
+      } catch (e) {}
     }
     // Remove old keys explicitly
-    [STORAGE_KEY_PREFIX, STORAGE_WIRE_KEY_PREFIX, STORAGE_VIEW_KEY_PREFIX, STORAGE_CUSTOM_PREFIX, STORAGE_INLINE_EXPANDED_KEY_PREFIX].forEach(pfx => {
+    [STORAGE_KEY_PREFIX, STORAGE_WIRE_KEY_PREFIX, STORAGE_VIEW_KEY_PREFIX, STORAGE_CUSTOM_PREFIX,
+      STORAGE_INLINE_EXPANDED_KEY_PREFIX, STORAGE_LOCAL_META_PREFIX].forEach(pfx => {
       try { localStorage.removeItem(pfx + oldName); } catch(e) {}
     });
     // Update in-memory state
@@ -1269,6 +1525,7 @@ async function deleteDesign(name) {
       STORAGE_VIEW_KEY_PREFIX,
       STORAGE_CUSTOM_PREFIX,
       STORAGE_INLINE_EXPANDED_KEY_PREFIX,
+      STORAGE_LOCAL_META_PREFIX,
     ].forEach(prefix => {
       try { localStorage.removeItem(prefix + name); } catch (e) {}
     });
