@@ -2461,7 +2461,7 @@ function renderCanvas() {
       });
     }
 
-    // Left-click: show comment popup (if comment exists)
+    // 左键只负责更新模块选择框；注释通过右键或设置面板打开。
     box.addEventListener('click', e => {
       if (state.justFinishedDrag) return;
       e.stopPropagation();
@@ -2478,23 +2478,7 @@ function renderCanvas() {
         if (instName) {
           updateModuleClickSelection(renderPath, clickInfo.shiftKey, clickInfo.additive);
         }
-        if (clickInfo.shiftKey || clickInfo.additive) {
-          closeCommentPopup();
-          return;
-        }
-        const customs = state.customizations[tab.name] || { modules: {} };
-        const modCustom = customs.modules?.[instName] || {};
-        if (modCustom.comment) {
-          showCommentPopup(
-            instName,
-            modName,
-            modCustom.comment,
-            clickInfo.clientX,
-            clickInfo.clientY,
-          );
-        } else {
-          closeCommentPopup();
-        }
+        closeCommentPopup();
       }, 220);
     });
   });
@@ -2517,16 +2501,13 @@ function renderCanvas() {
       });
     }
 
-    // Also allow drag from the header text area
+    // 标题用于原生文本选择，不能再被当作模块拖拽起点。
     const titleText = box.querySelector('.module-title');
     if (titleText) {
-      titleText.style.cursor = 'move';
+      titleText.style.cursor = 'text';
       titleText.addEventListener('mousedown', e => {
         if (e.button !== 0) return;
         e.stopPropagation();
-        e.preventDefault();
-        clearActiveCommentBlock();
-        startModuleDrag(e, instName, box);
       });
     }
   });

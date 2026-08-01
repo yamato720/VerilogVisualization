@@ -405,11 +405,17 @@ body {
 #canvas-container { flex: 1; position: relative; overflow: hidden; background: #0d1117; }
 #main-svg { width: 100%; height: 100%; cursor: grab; }
 #main-svg:active { cursor: grabbing; }
-/* Prevent text selection on SVG elements (dblclick was selecting module names) */
-#main-svg text, #main-svg .module-title, #main-svg .port-label, #main-svg .port-group-summary {
+/* 端口标签保持不可选；模块标题允许原生文本选择和复制。 */
+#main-svg text:not(.module-title), #main-svg .port-label, #main-svg .port-group-summary {
   user-select: none;
   -webkit-user-select: none;
   pointer-events: none;
+}
+#main-svg .module-title {
+  user-select: text;
+  -webkit-user-select: text;
+  pointer-events: auto;
+  cursor: text;
 }
 
 /* Module view navigation bar (back / forward / up + breadcrumb) */
