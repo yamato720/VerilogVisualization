@@ -28,6 +28,7 @@ description: 维护 `npc/VerilogVisualization` 的 RTL 发现、已保存设计 
 ## 持久化规则
 
 - JSON 是已保存设计的权威状态。打开设计时，已有的 `layout`、`wire_waypoints`、`customizations` 和 `view_state` 必须覆盖旧 `localStorage`。
+- `layout_metrics` 是由当前 RTL、`layout` 与 `inline_expanded_paths` 计算出的只读布局摘要，不是坐标的权威来源。仅当其 `generated_for_layout_revision` 与 `geometry_signature` 可验证时使用；坐标、展开状态或 RTL 改变后必须重新生成。
 - `server_sync_enabled` 是每个设计的 JSON 字段；字段缺失时默认 `true`。开启实时同步先提交当前内存状态，再同步后续编辑；关闭实时同步必须取消已排队请求，并只提交该开关字段，不能连同过期坐标一起写回。
 - 手动保存应强制提交当前设计状态；打开设计本身和刷新后的重新打开不得自动写回状态。
 - 最近激活的设计名保存在浏览器 `localStorage` 的 `vviz_last_design`；启动拉取设计列表后，仅在设计仍存在时自动恢复，设计的重命名、删除和标签切换必须同步更新该指针；该指针不写入设计 JSON。
@@ -73,6 +74,15 @@ node npc/VerilogVisualization/.codex/skills/verilog-visualization-layout/scripts
 ```
 
 该脚本用当前 `renderer.js` 重建线路，检查输出/输入进入方向、非正交线段与压到模块上的路径。任一检查失败时，先调整模块位置或手工拐点，不能只靠视觉猜测。
+
+需要将当前可见层级的实际边界、展开尺寸和实例几何写入 JSON 时，运行：
+
+```bash
+node npc/VerilogVisualization/.codex/skills/verilog-visualization-layout/scripts/update-layout-metrics.js \
+  npc/VerilogVisualization/data/VerilogVisualization/<design>.json
+```
+
+提交前以 `--check` 确认摘要没有过期。该摘要用于布局判断和审阅，渲染器仍以实际模块、`layout` 和展开状态为准。
 
 再执行 JSON 解析、`node --check src/static/app.js`，并通过运行中的 `/api/design/<design>` 确认服务返回的坐标与磁盘 JSON 相同。修改前端后，以项目虚拟环境启动服务：
 

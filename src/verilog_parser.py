@@ -649,7 +649,7 @@ def analyze_and_save(source_path: str, data_dir: str, save_name_override: str = 
             for key in (
                 'layout', 'wire_waypoints', 'timeline_dividers', 'view_state', 'customizations',
                 'tree_expanded', 'inline_expanded_paths', 'sidebar_ui',
-                'canvas_controls', 'server_sync_enabled', 'layout_revision',
+                'canvas_controls', 'server_sync_enabled', 'layout_revision', 'layout_metrics',
             ):
                 if key in previous_design:
                     saved_ui_state[key] = previous_design[key]
