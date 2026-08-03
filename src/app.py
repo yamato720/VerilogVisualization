@@ -409,6 +409,8 @@ def export_design(name, fmt):
     if fmt == 'svg':
         svg_content = request.args.get('svg', '')
         if svg_content:
+            svg_content = re.sub(r'<script[\s\S]*?</script>', '', svg_content, flags=re.IGNORECASE)
+            svg_content = re.sub(r'\s+on\w+\s*=\s*(?:"[^"]*"|\'[^\']*\')', '', svg_content, flags=re.IGNORECASE)
             buf = io.BytesIO(svg_content.encode('utf-8'))
             buf.seek(0)
             return send_file(buf, mimetype='image/svg+xml',
@@ -775,4 +777,4 @@ if __name__ == '__main__':
     print(f"Verilog data: {VERILOG_DATA_DIR}")
     print(f"Chisel data:  {CHISEL_DATA_DIR}")
     print(f"Starting Verilog Visualizer on http://{host}:{port}")
-    app.run(host=host, port=port, debug=True)
+    app.run(host=host, port=port, debug=False)
