@@ -1,11 +1,27 @@
 ---
 name: verilog-visualization-layout
-description: 维护 `npc/VerilogVisualization` 的 RTL 发现、已保存设计 JSON、数据流可视化布局、刷新保留状态和同步控制。处理 Verilog/SystemVerilog 分析结果、`data/VerilogVisualization/*.json`、模块位置冲突、手工 JSON 布局被浏览器缓存覆盖，或需要按硬件数据流重排可视化设计图时使用。
+description: 维护工作区中可自动定位的 VerilogVisualization 项目的 RTL 发现、已保存设计 JSON、数据流可视化布局、刷新保留状态和同步控制。处理 Verilog/SystemVerilog 分析结果、`data/VerilogVisualization/*.json`、模块位置冲突、手工 JSON 布局被浏览器缓存覆盖，或需要按硬件数据流重排可视化设计图时使用。
 ---
 
 # Verilog 可视化布局
 
-在工作区根目录操作；可视化项目根目录为 `npc/VerilogVisualization/`。
+在工作区根目录操作，但不要假定可视化项目位于某个固定目录名下。先解析一个临时的 `<visualizer_root>`，后续所有路径都相对于它。
+
+## 项目根目录定位
+
+每次使用本 skill 时先定位 `<visualizer_root>`，不要直接拼接历史目录名：
+
+1. 优先把本 `SKILL.md` 所在目录向上三级的目录作为候选根目录；例如
+   `<visualizer_root>/.codex/skills/verilog-visualization-layout/SKILL.md`。
+2. 确认候选目录同时包含 `src/app.py`、`src/static/app.js`、
+   `src/static/renderer.js` 和 `data/VerilogVisualization/`。如果不满足，
+   从当前工作区根目录用 `rg --files` 搜索这些文件，再取包含它们的共同项目根目录。
+3. 后续命令先切换到 `<visualizer_root>`，然后只使用
+   `.codex/skills/verilog-visualization-layout/...`、`src/...` 和
+   `data/VerilogVisualization/...` 这类项目内相对路径。不要依赖当前工作区
+   恰好位于项目的父目录，也不要把 `<visualizer_root>` 当成字面目录名。
+
+如果找不到同时满足上述文件条件的根目录，先报告实际搜索到的候选路径，再停止布局修改；不要猜测目录名。
 
 ## 定位
 
@@ -15,7 +31,7 @@ description: 维护 `npc/VerilogVisualization` 的 RTL 发现、已保存设计 
 2. `src/verilog_parser.py`：RTL 解析和刷新时的 JSON 状态保留。
 3. `src/static/app.js`：浏览器状态、同步开关、手动保存和视图恢复。
 4. `src/static/renderer.js`：`layoutInstances`、`calcModuleSize` 和实际坐标语义。
-5. 目标 `data/VerilogVisualization/<design>.json`：`source_path`、`modules`、`layout` 和持久化 UI 状态。
+5. `<visualizer_root>/data/VerilogVisualization/<design>.json`：`source_path`、`modules`、`layout` 和持久化 UI 状态。
 
 不要根据 Config 名称、FPGA 类型或目录命名猜测 RTL；始终从保存设计 JSON 的 `source_path` 和实际模块连接出发。
 
@@ -49,25 +65,26 @@ description: 维护 `npc/VerilogVisualization` 的 RTL 发现、已保存设计 
 
 修改 JSON 后运行：
 
-```bash
-node npc/VerilogVisualization/.codex/skills/verilog-visualization-layout/scripts/check-layout.js \
-  npc/VerilogVisualization/data/VerilogVisualization/<design>.json
+```text
+# 以下命令均从 <visualizer_root> 执行；<visualizer_root> 不是字面目录名。
+node .codex/skills/verilog-visualization-layout/scripts/check-layout.js data/VerilogVisualization/<design>.json
 ```
 
 使用 `--parent NpcBackend --parent NpcMemoryFabric` 只检查指定模块。脚本复用当前渲染器的尺寸与自动布局规则，非零退出表示同一模块视图存在重叠。
 
 重布线后还必须运行：
 
-```bash
-node npc/VerilogVisualization/.codex/skills/verilog-visualization-layout/scripts/check-routing.js \
-  npc/VerilogVisualization/data/VerilogVisualization/<design>.json \
-  --parent NpcBackend
+```text
+# 以下命令均从 <visualizer_root> 执行。
+node .codex/skills/verilog-visualization-layout/scripts/check-routing.js data/VerilogVisualization/<design>.json --parent NpcBackend
 ```
 
 该脚本用当前 `renderer.js` 重建线路，检查输出/输入进入方向、非正交线段与压到模块上的路径。任一检查失败时，先调整模块位置或手工拐点，不能只靠视觉猜测。
 
-再执行 JSON 解析、`node --check src/static/app.js`，并通过运行中的 `/api/design/<design>` 确认服务返回的坐标与磁盘 JSON 相同。修改前端后，以项目虚拟环境启动服务：
+再执行 JSON 解析、`node --check src/static/app.js`，并通过运行中的 `/api/design/<design>` 确认服务返回的坐标与磁盘 JSON 相同。修改前端后，从 `<visualizer_root>` 启动服务；如果存在 `.venv`，按当前平台选择其中的 Python，否则使用当前环境的 `python`：
 
-```bash
-npc/VerilogVisualization/.venv/bin/python npc/VerilogVisualization/src/app.py
+```text
+python src/app.py
+# Windows 虚拟环境也可以使用：.venv/Scripts/python.exe src/app.py
+# POSIX 虚拟环境使用：.venv/bin/python src/app.py
 ```
