@@ -4,17 +4,23 @@
 # 用法:
 #   bash start.sh [HOST] [PORT]
 # 示例:
-#   bash start.sh                    # 本地模式 127.0.0.1:5000
-#   bash start.sh 0.0.0.0            # 监听所有网卡，端口 5000
-#   bash start.sh 0.0.0.0 8080      # 远程部署，绑定所有网卡的 8080 端口
+#   bash start.sh                    # 本机 127.0.0.1:5000
+#   bash start.sh 127.0.0.1 5500     # 指定端口
+#   bash start.sh 0.0.0.0 8080      # 显式监听所有网卡
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+# shellcheck source=scripts/vv-wsl-host.sh
+source "$SCRIPT_DIR/scripts/vv-wsl-host.sh"
 
 # ── 参数解析 ──────────────────────────────────────────────────────────
 HOST="${1:-127.0.0.1}"
 PORT="${2:-5000}"
+# 未显式指定端口时，避开 Windows 已占用的端口，否则 WSL localhost 转发进不去。
+if [[ -z ${2:-} ]]; then
+    PORT=$(vv_choose_forwardable_port "$PORT")
+fi
 
 echo "⚡ Verilog Visualizer 启动中..."
 echo "================================"
@@ -63,17 +69,12 @@ mkdir -p data
 
 echo "================================"
 echo "🌐 启动 Web 服务器: http://${HOST}:${PORT}"
+echo "   浏览器访问: http://127.0.0.1:${PORT}"
 echo "   按 Ctrl+C 停止"
 echo "================================"
 
-# ── 自动打开浏览器（仅本地部署时）──────────────────────────────────────
-if [[ "$HOST" == "127.0.0.1" || "$HOST" == "localhost" ]]; then
-    if command -v xdg-open &>/dev/null; then
-        (sleep 1 && xdg-open "http://${HOST}:${PORT}") &
-    elif command -v open &>/dev/null; then
-        (sleep 1 && open "http://${HOST}:${PORT}") &
-    fi
-fi
+# ── 自动打开浏览器 ─────────────────────────────────────────────────────
+vv_open_browser "http://127.0.0.1:${PORT}"
 
 # ── 启动服务器 ─────────────────────────────────────────────────────────
 cd src

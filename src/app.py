@@ -11,7 +11,10 @@ import re
 import subprocess
 import heapq
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory
-from verilog_parser import analyze_and_save, parse_verilog_file, parse_verilog_folder, build_hierarchy
+from verilog_parser import (
+    analyze_and_save, parse_verilog_file, parse_verilog_folder, build_hierarchy,
+    atomic_write_json,
+)
 from chisel_parser import (
     parse_chisel_folder, list_scala_files, get_modules_in_file,
     detect_package, create_chisel_file, save_module_to_file, parse_chisel_file,
@@ -57,8 +60,9 @@ def analysis_source_path(source_path):
     if contains_verilog_files(source_path):
         return source_path, None
 
+    rtl_hits = []
+    other_hits = []
     queue = [(0, 1, source_path)]
-    fallback = None
     searched = 0
     while queue and searched < RTL_DISCOVERY_LIMIT:
         depth, _, directory = heapq.heappop(queue)
@@ -66,9 +70,9 @@ def analysis_source_path(source_path):
 
         if contains_verilog_files(directory):
             if os.path.basename(directory).lower() == 'rtl':
-                return directory, f'已自动找到 RTL 目录：{directory}'
-            if fallback is None:
-                fallback = directory
+                rtl_hits.append(directory)
+            else:
+                other_hits.append(directory)
             continue
 
         try:
@@ -84,8 +88,16 @@ def analysis_source_path(source_path):
             name = os.path.basename(child).lower()
             heapq.heappush(queue, (depth + 1, 0 if name == 'rtl' else 1, child))
 
-    if fallback:
-        return fallback, f'已自动找到 Verilog 目录：{fallback}'
+    if len(rtl_hits) > 1:
+        preview = '\n'.join(rtl_hits[:8])
+        raise ValueError(f'目录下有多个 RTL 目录，请选择其中一个：\n{preview}')
+    if len(rtl_hits) == 1:
+        return rtl_hits[0], f'已自动找到 RTL 目录：{rtl_hits[0]}'
+    if len(other_hits) > 1:
+        preview = '\n'.join(other_hits[:8])
+        raise ValueError(f'目录下有多个 Verilog 目录，请选择其中一个：\n{preview}')
+    if len(other_hits) == 1:
+        return other_hits[0], f'已自动找到 Verilog 目录：{other_hits[0]}'
     return source_path, None
 
 
@@ -164,9 +176,8 @@ def analyze():
     if not os.path.exists(source_path):
         return jsonify({'error': f'Path not found: {source_path}'}), 404
 
-    source_path, analysis_notice = analysis_source_path(source_path)
-
     try:
+        source_path, analysis_notice = analysis_source_path(source_path)
         result = analyze_and_save(source_path, DATA_DIR)
         return jsonify({
             'success': True,
@@ -174,8 +185,12 @@ def analyze():
             'top_modules': result['top_modules'],
             'module_count': len(result['modules']),
             'analysis_path': source_path,
+            'source_path': result.get('source_path', source_path),
             'analysis_notice': analysis_notice,
+            'name_collision': bool(result.get('name_collision')),
         })
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -307,6 +322,14 @@ def rename_design():
 
     # Rename JSON file
     os.rename(old_json, new_json)
+    try:
+        with open(new_json, 'r', encoding='utf-8') as handle:
+            design_data = json.load(handle)
+        if isinstance(design_data, dict):
+            design_data['save_path'] = new_json
+            atomic_write_json(new_json, design_data)
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
 
     # Rename comment folder if it exists
     old_comment_dir = os.path.join(DATA_DIR, old_name)
@@ -342,8 +365,7 @@ def save_customizations():
     with open(json_path, 'r', encoding='utf-8') as f:
         design_data = json.load(f)
     design_data['customizations'] = customizations
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(design_data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(json_path, design_data)
     return jsonify({'success': True})
 
 
@@ -363,8 +385,7 @@ def save_state():
     for key in ('layout', 'wire_waypoints', 'timeline_dividers', 'view_state', 'customizations', 'tree_expanded', 'inline_expanded_paths', 'sidebar_ui', 'canvas_controls', 'server_sync_enabled', 'layout_revision'):
         if key in data:
             design_data[key] = data[key]
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(design_data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(json_path, design_data)
     return jsonify({'success': True})
 
 
@@ -730,8 +751,7 @@ def chisel_save_design_state():
         if key in data:
             existing[key] = data[key]
 
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(existing, f, ensure_ascii=False, indent=2)
+    atomic_write_json(json_path, existing)
     return jsonify({'success': True})
 
 

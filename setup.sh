@@ -5,13 +5,15 @@
 # 用法:
 #   bash setup.sh [HOST] [PORT]
 # 示例:
-#   bash setup.sh                    # 本地模式 127.0.0.1:5000
-#   bash setup.sh 0.0.0.0            # 监听所有网卡，端口 5000
-#   bash setup.sh 0.0.0.0 8080      # 远程部署，绑定所有网卡的 8080 端口
+#   bash setup.sh                    # 本机 127.0.0.1:5000
+#   bash setup.sh 127.0.0.1 5500     # 指定端口
+#   bash setup.sh 0.0.0.0 8080      # 显式监听所有网卡
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+# shellcheck source=scripts/vv-wsl-host.sh
+source "$SCRIPT_DIR/scripts/vv-wsl-host.sh"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -22,6 +24,9 @@ NC='\033[0m'
 # ── 参数解析 ──────────────────────────────────────────────────────────
 HOST="${1:-127.0.0.1}"
 PORT="${2:-5000}"
+if [[ -z ${2:-} ]]; then
+    PORT=$(vv_choose_forwardable_port "$PORT")
+fi
 
 echo -e "${CYAN}"
 echo "╔══════════════════════════════════════╗"
@@ -95,18 +100,12 @@ mkdir -p data
 echo ""
 echo -e "${CYAN}════════════════════════════════════════${NC}"
 echo -e "${GREEN}🌐 服务器地址: http://${HOST}:${PORT}${NC}"
+echo -e "${GREEN}   浏览器访问: http://127.0.0.1:${PORT}${NC}"
 echo -e "${CYAN}   按 Ctrl+C 停止服务器${NC}"
 echo -e "${CYAN}════════════════════════════════════════${NC}"
 echo ""
 
-# 自动打开浏览器（若可用，仅本地部署时）
-if [[ "$HOST" == "127.0.0.1" || "$HOST" == "localhost" ]]; then
-    if command -v xdg-open &>/dev/null; then
-        (sleep 1.2 && xdg-open "http://${HOST}:${PORT}") &
-    elif command -v open &>/dev/null; then
-        (sleep 1.2 && open "http://${HOST}:${PORT}") &
-    fi
-fi
+vv_open_browser "http://127.0.0.1:${PORT}"
 
 cd src
 VV_HOST="$HOST" VV_PORT="$PORT" python app.py

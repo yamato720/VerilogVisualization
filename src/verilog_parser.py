@@ -5,6 +5,7 @@ Verilog Parser - Parses Verilog files to extract module hierarchy, ports, and co
 import re
 import os
 import json
+import tempfile
 from typing import Dict, List, Optional, Tuple
 
 
@@ -532,6 +533,252 @@ def build_hierarchy(modules: List[VerilogModule]) -> Dict:
     }
 
 
+def reachable_module_names(modules: Dict, top_modules) -> set:
+    """Modules still hanging off the current top hierarchy."""
+    seen = set()
+    stack = list(top_modules or [])
+    while stack:
+        name = stack.pop()
+        if name in seen or name not in modules:
+            continue
+        seen.add(name)
+        for inst in modules[name].get('instances') or []:
+            child = inst.get('module_type')
+            if child:
+                stack.append(child)
+    return seen
+
+
+def stabilize_top_modules(modules: Dict, new_tops, previous_tops=None):
+    """Keep the previous top if it still exists; do not promote leftover types."""
+    previous = [name for name in (previous_tops or []) if name in modules]
+    if previous:
+        return previous
+    return list(new_tops or [])
+
+
+def prune_preserved_ui_state(ui_state: Dict, modules: Dict, top_modules) -> Dict:
+    """Drop layout / waypoint / expansion entries whose RTL instances are gone."""
+    if not ui_state:
+        return ui_state
+
+    instance_names = set()
+    scoped_keys = set()
+    instances_by_parent = {}
+    for parent, module in (modules or {}).items():
+        names = set()
+        for inst in module.get('instances') or []:
+            inst_name = inst.get('instance_name')
+            if not inst_name:
+                continue
+            instance_names.add(inst_name)
+            scoped_keys.add(f'{parent}::{inst_name}')
+            names.add(inst_name)
+        instances_by_parent[parent] = names
+
+    render_paths = set()
+
+    def visit(mod_name, path, seen):
+        render_paths.add(path)
+        if mod_name in seen:
+            return
+        next_seen = set(seen)
+        next_seen.add(mod_name)
+        for inst in (modules.get(mod_name) or {}).get('instances') or []:
+            inst_name = inst.get('instance_name')
+            child = inst.get('module_type')
+            if not inst_name:
+                continue
+            child_path = f'{path}{inst_name}' if path.endswith('::') else f'{path}/{inst_name}'
+            visit(child, child_path, next_seen)
+
+    for top in top_modules or []:
+        visit(top, f'{top}::', set())
+
+    module_names = set(modules or {})
+
+    def keep_layout_key(key):
+        if key in scoped_keys:
+            return True
+        if '::' in str(key):
+            parent, inst = str(key).split('::', 1)
+            return inst in instances_by_parent.get(parent, set())
+        return key in instance_names
+
+    def keep_wire_key(key):
+        text = str(key)
+        parent = None
+        local = text
+        if '::' in text:
+            parent, local = text.split('::', 1)
+        if '→' not in local:
+            return keep_layout_key(key)
+        src, dst = local.split('→', 1)
+        src_inst = src.split('.', 1)[0]
+        dst_inst = dst.split('.', 1)[0]
+        names = instances_by_parent.get(parent, instance_names) if parent else instance_names
+        src_ok = src_inst.startswith('@') or src_inst in names
+        dst_ok = dst_inst.startswith('@') or dst_inst in names
+        return src_ok and dst_ok
+
+    layout = ui_state.get('layout')
+    if isinstance(layout, dict):
+        ui_state['layout'] = {key: value for key, value in layout.items() if keep_layout_key(key)}
+
+    waypoints = ui_state.get('wire_waypoints')
+    if isinstance(waypoints, dict):
+        ui_state['wire_waypoints'] = {
+            key: value for key, value in waypoints.items() if keep_wire_key(key)
+        }
+
+    customizations = ui_state.get('customizations')
+    if isinstance(customizations, dict):
+        modules_ui = customizations.get('modules')
+        if isinstance(modules_ui, dict):
+            customizations['modules'] = {
+                key: value for key, value in modules_ui.items()
+                if keep_layout_key(key) or key in instance_names
+            }
+        wires_ui = customizations.get('wires')
+        if isinstance(wires_ui, dict):
+            customizations['wires'] = {
+                key: value for key, value in wires_ui.items() if keep_wire_key(key)
+            }
+        ui_state['customizations'] = customizations
+
+    paths = ui_state.get('inline_expanded_paths')
+    if isinstance(paths, list):
+        ui_state['inline_expanded_paths'] = [path for path in paths if path in render_paths]
+
+    tree = ui_state.get('tree_expanded')
+    if isinstance(tree, list):
+        ui_state['tree_expanded'] = [
+            path for path in tree if path in module_names or path in render_paths
+        ]
+
+    dividers = ui_state.get('timeline_dividers')
+    if isinstance(dividers, list):
+        ui_state['timeline_dividers'] = [
+            divider for divider in dividers
+            if isinstance(divider, dict) and divider.get('parent_module') in module_names
+        ]
+
+    view_state = ui_state.get('view_state')
+    if isinstance(view_state, dict):
+        viewed = view_state.get('module')
+        if viewed and viewed not in module_names:
+            view_state = dict(view_state)
+            view_state['module'] = (top_modules or [None])[0]
+            ui_state['view_state'] = view_state
+
+    return ui_state
+
+
+def normalize_source_path(path: str) -> str:
+    """Absolute, symlink-resolved path without a trailing separator."""
+    if not path:
+        return ''
+    expanded = os.path.abspath(os.path.expanduser(path))
+    try:
+        resolved = os.path.realpath(expanded)
+    except OSError:
+        resolved = os.path.normpath(expanded)
+    if len(resolved) > 1 and resolved.endswith(os.sep):
+        return resolved.rstrip(os.sep)
+    return resolved
+
+
+def _path_is_within(inner: str, outer: str) -> bool:
+    inner_norm = os.path.normpath(inner)
+    outer_norm = os.path.normpath(outer)
+    if inner_norm == outer_norm:
+        return True
+    prefix = outer_norm + os.sep
+    return inner_norm.startswith(prefix)
+
+
+def source_paths_are_same_design(existing_path: str, incoming_path: str) -> bool:
+    """True only when both paths clearly belong to the same saved design."""
+    existing = normalize_source_path(existing_path)
+    incoming = normalize_source_path(incoming_path)
+    if not existing or not incoming:
+        return False
+    if existing == incoming:
+        return True
+    existing_is_dir = os.path.isdir(existing)
+    incoming_is_dir = os.path.isdir(incoming)
+    existing_is_file = os.path.isfile(existing)
+    incoming_is_file = os.path.isfile(incoming)
+    if incoming_is_file and existing_is_dir:
+        return _path_is_within(incoming, existing)
+    if existing_is_file and incoming_is_dir:
+        return _path_is_within(existing, incoming)
+    return False
+
+
+def peek_design_source_path(json_path: str) -> Optional[str]:
+    """
+    Read source_path from a design JSON.
+    Returns '' when the file is readable but has no source_path.
+    Returns None when the file cannot be trusted (truncated, invalid, etc.).
+    """
+    try:
+        with open(json_path, 'r', encoding='utf-8') as handle:
+            head = handle.read(8192)
+        match = re.search(r'"source_path"\s*:\s*("(?:\\.|[^"\\])*")', head)
+        if match:
+            value = json.loads(match.group(1))
+            return value if isinstance(value, str) else None
+        with open(json_path, 'r', encoding='utf-8') as handle:
+            existing = json.load(handle)
+        if not isinstance(existing, dict):
+            return None
+        value = existing.get('source_path', '')
+        return value if isinstance(value, str) else None
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
+        return None
+
+
+def allocate_unique_save_name(data_dir: str, save_name: str, source_path: str):
+    """
+    Choose a JSON filename that will not clobber a different design.
+    Unreadable or path-less JSON is treated as occupied.
+    Returns (save_name, save_path, name_collision).
+    """
+    candidate = save_name
+    counter = 1
+    collided = False
+    while True:
+        candidate_path = os.path.join(data_dir, f"{candidate}.json")
+        if not os.path.exists(candidate_path):
+            return candidate, candidate_path, collided
+        existing_source = peek_design_source_path(candidate_path)
+        if existing_source and source_paths_are_same_design(existing_source, source_path):
+            return candidate, candidate_path, collided
+        collided = True
+        candidate = f"{save_name}_{counter}"
+        counter += 1
+
+
+def atomic_write_json(path: str, data) -> None:
+    """Write JSON by replacing a temp file so readers never see a truncated document."""
+    directory = os.path.dirname(path) or '.'
+    handle, tmp_path = tempfile.mkstemp(prefix='.vviz-', suffix='.json.tmp', dir=directory)
+    try:
+        with os.fdopen(handle, 'w', encoding='utf-8') as output:
+            json.dump(data, output, indent=2, ensure_ascii=False)
+            output.write('\n')
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def analyze_and_save(source_path: str, data_dir: str, save_name_override: str = None) -> Dict:
     """
     Analyze Verilog source(s) and save result to data directory.
@@ -583,7 +830,7 @@ def analyze_and_save(source_path: str, data_dir: str, save_name_override: str = 
         raise ValueError(f"No Verilog modules found in: {source_path}")
 
     result = build_hierarchy(modules)
-    result['source_path'] = os.path.abspath(source_path)
+    result['source_path'] = normalize_source_path(source_path)
 
     # Collect all source files that were parsed
     source_files = []
@@ -621,40 +868,41 @@ def analyze_and_save(source_path: str, data_dir: str, save_name_override: str = 
 
     os.makedirs(data_dir, exist_ok=True)
 
-    # If a JSON with the same name already exists but was built from a different
-    # source path, avoid clobbering it by appending a numeric suffix.
-    candidate = save_name
-    counter = 1
-    while True:
-        candidate_path = os.path.join(data_dir, f"{candidate}.json")
-        if not os.path.exists(candidate_path):
-            break  # free slot
-        try:
-            with open(candidate_path, 'r', encoding='utf-8') as _f:
-                existing = json.load(_f)
-            if existing.get('source_path') == os.path.abspath(source_path):
-                break  # same source — overwrite is fine
-        except Exception:
-            break  # unreadable file, overwrite
-        candidate = f"{save_name}_{counter}"
-        counter += 1
-    save_name = candidate
-    save_path = candidate_path
+    # Refresh/reload keeps the caller's design name. Browse/analyze must never
+    # replace a same-named JSON that came from a different (or unknown) path.
+    name_collision = False
+    if save_name_override:
+        save_name = save_name_override
+        save_path = os.path.join(data_dir, f"{save_name}.json")
+    else:
+        save_name, save_path, name_collision = allocate_unique_save_name(
+            data_dir, save_name, source_path)
 
     saved_ui_state = {}
-    if save_name_override and os.path.exists(save_path):
+    previous_tops = []
+    if os.path.exists(save_path):
         try:
             with open(save_path, 'r', encoding='utf-8') as saved_file:
                 previous_design = json.load(saved_file)
+            previous_tops = list(previous_design.get('top_modules') or [])
             for key in (
                 'layout', 'wire_waypoints', 'timeline_dividers', 'view_state', 'customizations',
                 'tree_expanded', 'inline_expanded_paths', 'sidebar_ui',
-                'canvas_controls', 'server_sync_enabled', 'layout_revision', 'layout_metrics',
+                'canvas_controls', 'server_sync_enabled', 'layout_revision',
             ):
                 if key in previous_design:
                     saved_ui_state[key] = previous_design[key]
         except (OSError, json.JSONDecodeError):
             pass
+
+    result['top_modules'] = stabilize_top_modules(
+        result['modules'], result['top_modules'], previous_tops)
+    reachable = reachable_module_names(result['modules'], result['top_modules'])
+    if reachable:
+        result['modules'] = {
+            name: module for name, module in result['modules'].items() if name in reachable
+        }
+    prune_preserved_ui_state(saved_ui_state, result['modules'], result['top_modules'])
 
     # Build an ordered dict so metadata appears at the top of the JSON file,
     # making source_path / save_path easy to locate without scrolling past
@@ -677,11 +925,10 @@ def analyze_and_save(source_path: str, data_dir: str, save_name_override: str = 
         if key not in ('server_sync_enabled', 'layout_revision')
     })
 
-    with open(save_path, 'w', encoding='utf-8') as f:
-        json.dump(ordered_result, f, indent=2, ensure_ascii=False)
-        f.write('\n')
+    atomic_write_json(save_path, ordered_result)
 
     ordered_result['saved_as'] = save_name
+    ordered_result['name_collision'] = name_collision
     return ordered_result
 
 

@@ -32,7 +32,9 @@ description: 维护 `npc/VerilogVisualization` 的 RTL 发现、已保存设计 
 - `server_sync_enabled` 是每个设计的 JSON 字段；字段缺失时默认 `true`。开启实时同步先提交当前内存状态，再同步后续编辑；关闭实时同步必须取消已排队请求，并只提交该开关字段，不能连同过期坐标一起写回。
 - 手动保存应强制提交当前设计状态；打开设计本身和刷新后的重新打开不得自动写回状态。
 - 最近激活的设计名保存在浏览器 `localStorage` 的 `vviz_last_design`；启动拉取设计列表后，仅在设计仍存在时自动恢复，设计的重命名、删除和标签切换必须同步更新该指针；该指针不写入设计 JSON。
-- `/api/refresh` 和 `/api/reload` 重解析 `source_path` 后，必须保留 `layout`、`wire_waypoints`、`timeline_dividers`、`view_state`、`customizations`、`tree_expanded`、`sidebar_ui`、`canvas_controls` 与 `server_sync_enabled`。
+- `/api/analyze`（浏览文件或输入路径打开）按顶层模块名保存时，不得覆盖 `source_path` 不同的已有设计 JSON；应改用 `CPU_1` 这类后缀。现有 JSON 无法读取 `source_path`、内容被截断或缺少路径时同样必须让名，不能当成可覆盖。同一设计的目录与其内部 `.v`/`.sv` 视为同一 `source_path`。`/api/refresh` 和 `/api/reload` 使用设计名写回，不走让名。
+- 设计 JSON 必须原子写入（先写临时文件再替换），避免实时同步截断文件时被分析流程误判为可覆盖。
+- `/api/refresh` 和 `/api/reload` 重解析 `source_path` 后，必须保留 `layout`、`wire_waypoints`、`timeline_dividers`、`view_state`、`customizations`、`tree_expanded`、`sidebar_ui`、`canvas_controls` 与 `server_sync_enabled`。保留时只留下当前 RTL 仍存在的实例、连线和模块；已删除的布局键、waypoint、树展开路径不得继续累积。未再被顶层实例引用的模块定义不能升成新的 `top_modules`。`layout_metrics` 在重解析后丢弃，不从旧 JSON 复制。
 - 不存在 JSON `view_state` 时，只在本次打开后自动适配画布一次；不得重新采用旧浏览器视图。
 
 ## 数据流布局

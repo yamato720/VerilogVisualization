@@ -976,6 +976,113 @@ function clonePersistedValue(value) {
   catch (e) { return value; }
 }
 
+function collectLiveRtlIndex(modules, topModules) {
+  const moduleNames = new Set(Object.keys(modules || {}));
+  const instanceNames = new Set();
+  const scopedLayoutKeys = new Set();
+  const instancesByParent = new Map();
+  const renderPaths = new Set();
+
+  Object.entries(modules || {}).forEach(([parent, mod]) => {
+    const names = new Set();
+    (mod.instances || []).forEach(inst => {
+      if (!inst?.instance_name) return;
+      instanceNames.add(inst.instance_name);
+      scopedLayoutKeys.add(`${parent}::${inst.instance_name}`);
+      names.add(inst.instance_name);
+    });
+    instancesByParent.set(parent, names);
+  });
+
+  const visit = (modName, path, seen) => {
+    renderPaths.add(path);
+    if (seen.has(modName)) return;
+    const nextSeen = new Set(seen);
+    nextSeen.add(modName);
+    (modules?.[modName]?.instances || []).forEach(inst => {
+      if (!inst?.instance_name) return;
+      const childPath = path.endsWith('::')
+        ? `${path}${inst.instance_name}`
+        : `${path}/${inst.instance_name}`;
+      visit(inst.module_type, childPath, nextSeen);
+    });
+  };
+  (topModules || []).forEach(top => visit(top, `${top}::`, new Set()));
+  return { moduleNames, instanceNames, scopedLayoutKeys, instancesByParent, renderPaths };
+}
+
+function prunePersistedUiAgainstRtl(data) {
+  const modules = data?.modules || {};
+  const topModules = data?.top_modules || [];
+  const live = collectLiveRtlIndex(modules, topModules);
+  const keepLayoutKey = key => {
+    if (live.scopedLayoutKeys.has(key)) return true;
+    if (String(key).includes('::')) {
+      const [parent, inst] = String(key).split('::');
+      return live.instancesByParent.get(parent)?.has(inst) || false;
+    }
+    return live.instanceNames.has(key);
+  };
+  const keepWireKey = key => {
+    const text = String(key);
+    let parent = null;
+    let local = text;
+    if (text.includes('::')) {
+      const splitAt = text.indexOf('::');
+      parent = text.slice(0, splitAt);
+      local = text.slice(splitAt + 2);
+    }
+    if (!local.includes('→')) return keepLayoutKey(key);
+    const [src, dst] = local.split('→');
+    const srcInst = src.split('.')[0];
+    const dstInst = dst.split('.')[0];
+    const names = parent ? live.instancesByParent.get(parent) : live.instanceNames;
+    if (!names) return false;
+    const srcOk = srcInst.startsWith('@') || names.has(srcInst);
+    const dstOk = dstInst.startsWith('@') || names.has(dstInst);
+    return srcOk && dstOk;
+  };
+
+  if (data.layout && typeof data.layout === 'object') {
+    data.layout = Object.fromEntries(Object.entries(data.layout).filter(([key]) => keepLayoutKey(key)));
+  }
+  if (data.wire_waypoints && typeof data.wire_waypoints === 'object') {
+    data.wire_waypoints = Object.fromEntries(
+      Object.entries(data.wire_waypoints).filter(([key]) => keepWireKey(key))
+    );
+  }
+  if (data.customizations) {
+    const custom = normalizeCustomizations(data.customizations);
+    custom.modules = Object.fromEntries(
+      Object.entries(custom.modules || {}).filter(([key]) => keepLayoutKey(key) || live.instanceNames.has(key))
+    );
+    custom.wires = Object.fromEntries(
+      Object.entries(custom.wires || {}).filter(([key]) => keepWireKey(key))
+    );
+    data.customizations = custom;
+  }
+  if (Array.isArray(data.inline_expanded_paths)) {
+    data.inline_expanded_paths = data.inline_expanded_paths.filter(path => live.renderPaths.has(path));
+  }
+  if (Array.isArray(data.tree_expanded)) {
+    data.tree_expanded = data.tree_expanded.filter(path => (
+      live.moduleNames.has(path) || live.renderPaths.has(path)
+    ));
+  }
+  if (Array.isArray(data.timeline_dividers)) {
+    data.timeline_dividers = data.timeline_dividers.filter(divider => (
+      live.moduleNames.has(divider?.parent_module)
+    ));
+  }
+  if (data.view_state?.module && !live.moduleNames.has(data.view_state.module)) {
+    data.view_state = {
+      ...data.view_state,
+      module: topModules[0] || Object.keys(modules)[0],
+    };
+  }
+  return data;
+}
+
 function captureRefreshState(designName) {
   const sidebar = $('sidebar');
   const viewState = getCurrentViewState(designName);
@@ -1218,9 +1325,13 @@ async function doAnalyze() {
       return;
     }
     status.className = 'status-msg success';
-    status.textContent = data.analysis_notice
-      ? `✓ ${data.saved_as}（${data.analysis_notice}）`
-      : `✓ ${data.saved_as}`;
+    if (data.name_collision) {
+      status.textContent = `✓ 已另存为 ${data.saved_as}（顶层重名且路径不同，未覆盖原设计）`;
+    } else if (data.analysis_notice) {
+      status.textContent = `✓ ${data.saved_as}（${data.analysis_notice}）`;
+    } else {
+      status.textContent = `✓ ${data.saved_as}`;
+    }
     await loadDesignList();
     openDesign(data.saved_as);
   } catch (err) {
@@ -1244,6 +1355,7 @@ async function loadDesignList({ restoreLast = false } = {}) {
     designs.forEach(d => {
       const item = document.createElement('div');
       item.className = 'design-item' + (d.name === state.activeDesign ? ' active' : '');
+      if (d.source_path) item.title = d.source_path;
       item.innerHTML = `
         <span class="name">${d.name}</span>
         <span style="color:#484f58;font-size:11px;">${d.module_count}m</span>
@@ -1375,6 +1487,8 @@ async function openDesign(name, { refreshState = null } = {}) {
         }
       });
     }
+    // 布局只补新实例坐标；已从 RTL 删除的实例/连线必须丢掉，否则刷新会越积越多。
+    data = prunePersistedUiAgainstRtl(data);
     const moduleCount = Object.keys(data.modules || {}).length;
     const instCount = Object.values(data.modules || {}).reduce((sum, mod) => sum + (mod.instances?.length || 0), 0);
     updateLoadProgress(26, `读取完成：${moduleCount} 个模块，${instCount} 个实例`);
@@ -1409,7 +1523,7 @@ async function openDesign(name, { refreshState = null } = {}) {
 
     // Initialize sidebar tree expansion: load from server JSON, or pre-expand all modules with instances
     updateLoadProgress(36, `初始化模块树：${moduleCount} 个模块`);
-    if (!state.treeExpanded[name]) {
+    if (refreshState || !state.treeExpanded[name]) {
       if (data.tree_expanded && Array.isArray(data.tree_expanded)) {
         state.treeExpanded[name] = new Set(data.tree_expanded);
       } else {
